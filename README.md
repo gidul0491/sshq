@@ -35,15 +35,18 @@ git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 sshq                                     # 별칭 목록 (현재 프로젝트를 쓰는 별칭에 *)
 sshq <별칭> "<명령>"                      # 조회 명령 실행 (root 폴더에서)
 sshq get <별칭> <원격경로>                # work/<별칭>/ 아래로 내려받기 (폴더도 가능)
-sshq diff <별칭> <원격경로> [로컬경로]     # 원격 파일과 로컬 사본 비교
-sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드
+sshq diff <별칭> <원격경로> [로컬경로]     # 원격과 로컬 사본 비교 (폴더면 바뀐 파일·새 파일 목록)
+sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드 (폴더면 바뀐 파일만 묶음으로)
 sshq restore <별칭> <원격경로> [백업]      # 백업으로 되돌리기, 생략 시 가장 최근 백업
+sshq restore <별칭> --batch [묶음]         # 폴더 put 묶음 전체 되돌리기, 생략 시 묶음 목록
+sshq log <별칭> [줄수]                    # 서버를 바꾼 작업 기록 (기본 50줄)
 sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_delete/ 아래로 옮기기 (승인)
 sshq clean <별칭> [원격경로]              # work/<별칭>/의 로컬 사본 지우기, 생략 시 전부
 sshq backup <별칭> [원격폴더]             # backup/<별칭>/에 tar.gz로 받기, 생략 시 홈 전체
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
+sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec 거부, ""면 해제)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
@@ -56,6 +59,10 @@ sshq update                              # 새 버전으로 업데이트
 - `restore`는 되돌리기 직전 상태도 `~/_sshq_backup/` 아래에 `.bak_<시각>_before_restore`로 남긴다.
 - 폴더 `get`은 서버에서 tar로 묶어 한 번에 받고, tar를 못 쓰면 파일마다 받는다. 로컬에 이미 있던 파일은 덮어쓰고, 서버에 없는 로컬 파일은 지우지 않는다.
 - `backup`은 서버 폴더를 tar.gz 하나로 받아 풀지 않고 보관한다(권한·수정 시각 유지). 홈 전체일 때는 `_sshq_backup`, `_sshq_to_delete`를 뺀다. 받은 뒤 파일 수를 서버와 비교하고, 다르면 서버 경고와 함께 알린다. DB는 포함되지 않는다.
+- 폴더 `put`은 로컬 폴더와 원격을 비교해 바뀐 파일과 새 파일만 같은 시각(묶음)으로 백업·업로드하고, 묶음 내용을 `~/_sshq_backup/.batches/<묶음>.json`에 적어 둔다. 서버에만 있는 파일은 지우지 않는다. `restore --batch`는 바꾼 파일을 묶음 직전 백업으로 되돌리고, 새로 만든 파일은 `~/_sshq_to_delete/`로 옮긴다.
+- `restore`는 이름의 시각으로 가장 최근 백업을 고른다(백업은 원본 수정 시각을 유지하므로 파일 시각으로 고르지 않는다).
+- 서버를 바꾼 작업(put·restore·del·exec)은 `log/<별칭>.log`에 남는다(git 제외).
+- `mode`가 `readonly`인 별칭은 put·restore·del·exec를 거부한다. 조회·get·diff·backup은 된다.
 - `del`은 지우지 않고 서버 홈의 `~/_sshq_to_delete/` 아래 원래 경로로 옮긴다. 같은 이름이 있으면 뒤에 `_<시각>`을 붙인다. 옮긴 뒤 원래 자리에서 사라졌는지 확인한다.
 - `~/_sshq_backup`, `~/_sshq_to_delete` 폴더 권한은 sshq가 700(본인만)으로 맞춘다.
 - `~/`로 시작하는 원격경로는 로컬 셸이 바꾸지 않도록 `'~/...'`처럼 따옴표로 감싼다.
