@@ -4,7 +4,7 @@ Claude Code가 SSH로 서버를 직접 조회하고, 필요하면 백업한 뒤 
 
 - 조회 명령(`ls`, `cat`, `grep`, `tail`, `find` 등)은 묻지 않고 실행한다.
 - 파일 수정은 `get`(내려받기) → 로컬에서 편집 → `diff`(비교) → `put`(서버 홈의 `_sshq_backup/`에 백업 후 업로드) 순서로 한다.
-- 업로드·되돌리기·제한 없는 명령은 Claude Code가 실행 전에 사용자 승인을 받는다.
+- 업로드·되돌리기는 백업 후 바로 실행하고, 옮기기·제한 없는 명령은 Claude Code가 실행 전에 사용자 승인을 받는다.
 
 ## 설치
 
@@ -23,11 +23,11 @@ git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 
 ```
 "allow": [ "Bash(sshq *)", "Edit(~/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq put *)", "Bash(sshq restore *)", "Bash(sshq del *)", "Bash(sshq exec *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)" ],
 "deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)" ]
 ```
 
-`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 서버를 바꾸는 명령만 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열지 못하게 한다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
+`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기와 제한 없는 명령만 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열지 못하게 한다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
 
 ## 사용
 
@@ -36,8 +36,8 @@ sshq                                     # 별칭 목록 (현재 프로젝트를
 sshq <별칭> "<명령>"                      # 조회 명령 실행 (root 폴더에서)
 sshq get <별칭> <원격경로>                # work/<별칭>/ 아래로 내려받기 (폴더도 가능)
 sshq diff <별칭> <원격경로> [로컬경로]     # 원격 파일과 로컬 사본 비교
-sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드 (승인)
-sshq restore <별칭> <원격경로> [백업]      # 백업으로 되돌리기, 생략 시 가장 최근 백업 (승인)
+sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드
+sshq restore <별칭> <원격경로> [백업]      # 백업으로 되돌리기, 생략 시 가장 최근 백업
 sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_delete/ 아래로 옮기기 (승인)
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
