@@ -1,0 +1,11 @@
+{
+  "name": "sshq",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude Code용 SSH 명령어: 조회는 바로, 수정은 백업 후 (sshq)",
+  "bin": { "sshq": "sshq" },
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "server-example-prod": {
+    "host": "",
+    "port": 22,
+    "user": "",
+    "password": "",
+    "key": "",
+    "root": "www",
+    "projects": [],
+    "desc": ""
+  }
+}

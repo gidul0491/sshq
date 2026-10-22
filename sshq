@@ -1,0 +1,388 @@
+#!/usr/bin/env node
+// SSH 원격 작업: 조회는 바로, 수정은 서버 안에 백업한 뒤
+// 접속정보·라이브러리는 이 스크립트가 있는 폴더 기준 (sshq.json, node_modules, work/)
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync, execSync } = require('child_process');
+
+const DIR = path.dirname(fs.realpathSync(__filename));
+const LIB = path.join(DIR, 'node_modules');
+const FILE = path.join(DIR, 'sshq.json');
+const WORK = path.join(DIR, 'work');
+const MAX_LINES = 2000;
+const EDITABLE = ['root', 'projects', 'desc'];
+
+const fail = (msg, code = 1) => { console.error(msg); process.exit(code); };
+if (Number(process.versions.node.split('.')[0]) < 22) fail(`Node 22 이상이 필요합니다. (현재: ${process.version})`);
+
+const USAGE = `사용법:
+  sshq                                   별칭 목록 (현재 프로젝트를 쓰는 별칭에 *)
+  sshq <별칭> "<명령>"                    조회 명령 실행 (ls, cat, grep, tail, find ...)
+  sshq get <별칭> <원격경로>              원격 파일을 work/<별칭>/ 아래로 내려받기
+  sshq diff <별칭> <원격경로> [로컬경로]   원격 파일과 로컬 사본 비교
+  sshq put <별칭> <원격경로> [로컬경로]    원격 파일을 .bak_<시각>으로 백업한 뒤 업로드
+  sshq restore <별칭> <원격경로> [백업]    백업으로 되돌리기 (생략 시 가장 최근 백업)
+  sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
+  sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 삭제
+  sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)`;
+
+const CMDS = ['get', 'diff', 'put', 'restore', 'exec', 'set', 'new', 'help'];
+const argv = process.argv.slice(2);
+if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
+
+let all;
+try {
+  all = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+} catch (e) {
+  fail(`sshq.json 오류: ${e.message}`);
+}
+const save = () => fs.writeFileSync(FILE, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
+
+// ---------- 조회 명령 검사 ----------
+// 파이프로 이은 각 명령이 읽기 전용 목록에 있어야 하고, 쓰기·연결·치환 기호는 막는다
+const READ = new Set([
+  'ls', 'cat', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'find', 'pwd', 'whoami', 'id', 'uname', 'hostname',
+  'df', 'du', 'ps', 'uptime', 'free', 'stat', 'wc', 'file', 'which', 'date', 'md5sum', 'sha1sum', 'sha256sum',
+  'diff', 'sort', 'uniq', 'cut', 'tr', 'echo', 'readlink', 'realpath', 'basename', 'dirname', 'zcat', 'tree',
+  'php', 'tar', 'crontab', 'git', 'nl', 'column', 'test',
+]);
+// 따옴표 밖의 | 로 나눈다. 따옴표 밖의 ; & > < 줄바꿈, 작은따옴표 밖의 ` $( 는 거부한다
+function splitPipes(s) {
+  const segs = [];
+  let cur = '';
+  let quote = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote !== "'" && (ch === '`' || (ch === '$' && s[i + 1] === '('))) return null;
+    if (quote) {
+      if (ch === quote) quote = '';
+      else if (ch === '\\' && quote === '"') { cur += ch + (s[i + 1] || ''); i++; continue; }
+      cur += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue; }
+    if (ch === '\\') { cur += ch + (s[i + 1] || ''); i++; continue; }
+    if (/[;&><\n]/.test(ch)) return null;
+    if (ch === '|') { if (s[i + 1] === '|') return null; segs.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  if (quote) return null;
+  segs.push(cur);
+  return segs;
+}
+function checkRead(cmd) {
+  const s = cmd.replace(/\s2>\s*\/dev\/null(?=\s|$|\|)/g, ' ').replace(/\s2>&1(?=\s|$|\|)/g, ' ');
+  const segs = splitPipes(s);
+  if (!segs) return '조회 명령에는 따옴표 밖의 ; & && || > < 와 ` $( 를 쓸 수 없습니다. 수정은 put, 그 밖의 명령은 exec를 쓰세요.';
+  for (const seg of segs) {
+    const t = seg.trim().split(/\s+/);
+    const [c, a1 = ''] = t;
+    const rest = t.slice(1).join(' ');
+    if (!c) return '빈 명령이 있습니다.';
+    if (!READ.has(c)) return `조회 명령이 아닙니다: ${c} (허용: ${[...READ].join(', ')})`;
+    if (c === 'php' && !/^(-v|--version|-l|-m|-i|--ini)$/.test(a1)) return 'php는 -v, -l, -m, -i, --ini만 쓸 수 있습니다.';
+    if (c === 'tar' && !(/^--list$/.test(a1) || (/^-?[a-zA-Z]*t[a-zA-Z]*$/.test(a1) && !/[cxruA]/.test(a1)))) return 'tar는 목록 보기(t)만 쓸 수 있습니다.';
+    if (c === 'crontab' && rest !== '-l') return 'crontab은 -l만 쓸 수 있습니다.';
+    if (c === 'git' && !/^(status|log|diff|show|branch|remote|rev-parse|blame|ls-files)$/.test(a1)) return 'git은 조회 하위 명령만 쓸 수 있습니다.';
+    if (c === 'find' && /\s-(exec|execdir|delete|ok|okdir|fprint0?|fprintf|fls)\b/.test(' ' + rest)) return 'find에서 -exec, -delete 등은 쓸 수 없습니다.';
+    if (c === 'sort' && /(^|\s)(-o|--output)/.test(rest)) return 'sort -o는 쓸 수 없습니다.';
+  }
+  return '';
+}
+
+// ---------- 공통 ----------
+const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const ts = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+};
+const home = (p) => (p && p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
+
+function conf(alias) {
+  if (!alias) fail(USAGE);
+  const c = all[alias];
+  if (!c) fail(`별칭 없음: ${alias} (있는 별칭: ${Object.keys(all).join(', ')})`);
+  if (!c.host || !c.user) fail(`접속정보 미입력: ${alias} (${FILE})`);
+  return c;
+}
+
+// 원격 경로: 절대경로는 그대로, ~/는 홈 기준, 나머지는 root 기준(root가 없으면 홈 기준)
+function remotePath(c, p) {
+  if (!p) fail('원격경로를 입력하세요.');
+  if (p.startsWith('/')) return path.posix.normalize(p);
+  if (p.startsWith('~/')) return path.posix.normalize(p.slice(2));
+  return path.posix.normalize(c.root ? path.posix.join(c.root, p) : p);
+}
+function localPath(alias, rp) {
+  const lp = path.join(WORK, alias, rp.replace(/^\/+/, ''));
+  if (!lp.startsWith(path.join(WORK, alias) + path.sep)) fail(`잘못된 경로: ${rp}`);
+  return lp;
+}
+
+function connect(alias, c) {
+  const { Client } = require(path.join(LIB, 'ssh2'));
+  const opt = {
+    host: c.host,
+    port: Number(c.port) || 22,
+    username: c.user,
+    readyTimeout: 20000,
+    tryKeyboard: true,
+    hostHash: 'sha256',
+    hostVerifier: (fp) => {
+      if (!c.hostkey) {
+        all[alias].hostkey = fp;
+        save();
+        console.error(`(처음 접속: 서버 지문을 저장했습니다 ${fp.slice(0, 16)}...)`);
+        return true;
+      }
+      if (c.hostkey !== fp) {
+        console.error(`서버 지문이 저장된 값과 다릅니다. 서버가 바뀌었거나 중간자 공격일 수 있어 접속을 중단합니다.\n저장값: ${c.hostkey}\n현재값: ${fp}\n서버 교체가 확실하면 사용자가 sshq.json의 hostkey를 지우고 다시 실행합니다.`);
+        return false;
+      }
+      return true;
+    },
+  };
+  if (c.key) {
+    try { opt.privateKey = fs.readFileSync(home(c.key)); } catch (e) { fail(`키 파일을 읽을 수 없습니다: ${c.key}`); }
+    if (c.passphrase) opt.passphrase = c.passphrase;
+  }
+  if (c.password) opt.password = c.password;
+  if (!c.key && !c.password && process.env.SSH_AUTH_SOCK) opt.agent = process.env.SSH_AUTH_SOCK;
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    conn.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => c.password || '')));
+    conn.on('ready', () => resolve(conn));
+    conn.on('error', reject);
+    conn.connect(opt);
+  });
+}
+
+function run(conn, cmd) {
+  return new Promise((resolve, reject) => {
+    conn.exec(cmd, (err, stream) => {
+      if (err) return reject(err);
+      let out = '';
+      let errOut = '';
+      stream.on('data', (d) => { out += d; });
+      stream.stderr.on('data', (d) => { errOut += d; });
+      stream.on('close', (code) => resolve({ code: code ?? 0, out, err: errOut }));
+    });
+  });
+}
+
+const sftpOf = (conn) => new Promise((res, rej) => conn.sftp((e, s) => (e ? rej(e) : res(s))));
+const pcall = (fn) => new Promise((res, rej) => fn((e, v) => (e ? rej(e) : res(v))));
+const exists = (sftp, p) => pcall((cb) => sftp.stat(p, cb)).then((st) => st, () => null);
+const download = (sftp, rp, lp) => pcall((cb) => sftp.fastGet(rp, lp, cb)).catch((e) => {
+  throw new Error(`원격 파일을 받을 수 없습니다: ${rp} (${e.message})`);
+});
+async function mkdirp(sftp, dir) {
+  const parts = dir.split('/');
+  let cur = dir.startsWith('/') ? '' : '.';
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    cur = cur === '.' ? part : `${cur}/${part}`;
+    if (!(await exists(sftp, cur))) await pcall((cb) => sftp.mkdir(cur, cb));
+  }
+}
+
+function printOut(out) {
+  const lines = out.replace(/\n$/, '').split('\n');
+  if (out === '') return;
+  console.log(lines.slice(0, MAX_LINES).join('\n'));
+  if (lines.length > MAX_LINES) console.log(`(${lines.length}줄 중 ${MAX_LINES}줄 표시. head, grep으로 범위를 줄이세요)`);
+}
+
+const withCd = (c, cmd) => (c.root ? `cd ${q(c.root)} && ${cmd}` : cmd);
+
+// ---------- 명령 ----------
+async function cmdRun(alias, cmd, checked) {
+  const c = conf(alias);
+  if (!cmd) fail(USAGE);
+  if (checked) {
+    const why = checkRead(cmd);
+    if (why) fail(why);
+  }
+  const conn = await connect(alias, c);
+  try {
+    const r = await run(conn, withCd(c, cmd));
+    printOut(r.out);
+    if (r.err) process.stderr.write(r.err);
+    process.exitCode = r.code;
+  } finally {
+    conn.end();
+  }
+}
+
+async function cmdGet(alias, p) {
+  const c = conf(alias);
+  const rp = remotePath(c, p);
+  const lp = localPath(alias, rp);
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    fs.mkdirSync(path.dirname(lp), { recursive: true });
+    await download(sftp, rp, lp);
+    console.log(`${rp} → ${lp}`);
+  } finally {
+    conn.end();
+  }
+}
+
+async function cmdDiff(alias, p, local) {
+  const c = conf(alias);
+  const rp = remotePath(c, p);
+  const lp = local ? path.resolve(local) : localPath(alias, rp);
+  if (!fs.existsSync(lp)) fail(`로컬 파일 없음: ${lp} (먼저 sshq get ${alias} ${p})`);
+  const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sshq-')), 'remote');
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    await download(sftp, rp, tmp);
+  } finally {
+    conn.end();
+  }
+  const r = spawnSync('diff', ['-u', '--label', `원격:${rp}`, '--label', `로컬:${lp}`, tmp, lp], { encoding: 'utf8' });
+  fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
+  if (r.status === 0) console.log('차이 없음');
+  else printOut(r.stdout);
+}
+
+async function backup(conn, sftp, rp, tag) {
+  const bak = `${rp}.bak_${ts()}${tag || ''}`;
+  const r = await run(conn, `cp -p -- ${q(rp)} ${q(bak)}`);
+  if (r.code !== 0) {
+    // cp를 못 쓰는 서버(SFTP 전용)는 SFTP로 복사
+    const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sshq-')), 'b');
+    await pcall((cb) => sftp.fastGet(rp, tmp, cb));
+    await pcall((cb) => sftp.fastPut(tmp, bak, cb));
+    fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
+  }
+  const a = await exists(sftp, rp);
+  const b = await exists(sftp, bak);
+  if (!b || b.size !== a.size) throw new Error(`백업 확인 실패: ${bak}`);
+  return bak;
+}
+
+async function cmdPut(alias, p, local) {
+  const c = conf(alias);
+  const rp = remotePath(c, p);
+  const lp = local ? path.resolve(local) : localPath(alias, rp);
+  if (!fs.existsSync(lp)) fail(`로컬 파일 없음: ${lp}`);
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    const st = await exists(sftp, rp);
+    let bak = '';
+    if (st) bak = await backup(conn, sftp, rp);
+    else await mkdirp(sftp, path.posix.dirname(rp));
+    await pcall((cb) => sftp.fastPut(lp, rp, cb));
+    if (st) await pcall((cb) => sftp.chmod(rp, st.mode & 0o7777, cb));
+    const now = await exists(sftp, rp);
+    if (!now || now.size !== fs.statSync(lp).size) throw new Error(`업로드 확인 실패: ${rp}`);
+    console.log(`업로드: ${lp} → ${rp} (${now.size} bytes)`);
+    console.log(bak ? `백업: ${bak}\n되돌리기: sshq restore ${alias} ${p}` : '새 파일 (백업 없음)');
+  } finally {
+    conn.end();
+  }
+}
+
+async function cmdRestore(alias, p, bakArg) {
+  const c = conf(alias);
+  const rp = remotePath(c, p);
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    let bak = bakArg ? remotePath(c, bakArg) : '';
+    if (!bak) {
+      const r = await run(conn, `ls -1t -- ${q(rp)}.bak_* 2>/dev/null`);
+      const list = r.out.split('\n').filter((l) => l && !l.endsWith('_before_restore'));
+      if (!list.length) fail(`백업 없음: ${rp}.bak_*`);
+      bak = list[0];
+    }
+    if (!(await exists(sftp, bak))) fail(`백업 없음: ${bak}`);
+    let cur = '';
+    if (await exists(sftp, rp)) cur = await backup(conn, sftp, rp, '_before_restore');
+    const r = await run(conn, `cp -p -- ${q(bak)} ${q(rp)}`);
+    if (r.code !== 0) {
+      const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sshq-')), 'r');
+      await pcall((cb) => sftp.fastGet(bak, tmp, cb));
+      await pcall((cb) => sftp.fastPut(tmp, rp, cb));
+      fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
+    }
+    console.log(`되돌림: ${bak} → ${rp}`);
+    if (cur) console.log(`되돌리기 전 상태 백업: ${cur}`);
+  } finally {
+    conn.end();
+  }
+}
+
+function cmdSetNew(cmd, name, a, b) {
+  if (cmd === 'new') {
+    if (!name) fail('사용법: sshq new <별칭> [root] [설명]');
+    if (all[name]) fail(`이미 있는 별칭: ${name}`);
+    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '' };
+    if (b) all[name].desc = b;
+  } else {
+    if (!name || !a || b === undefined) fail(`사용법: sshq set <별칭> <${EDITABLE.join('|')}> <값>`);
+    if (!all[name]) fail(`별칭 없음: ${name} (있는 별칭: ${Object.keys(all).join(', ')})`);
+    if (!EDITABLE.includes(a)) fail(`수정할 수 없는 항목: ${a} (가능: ${EDITABLE.join(', ')})`);
+    const cur = all[name].projects || [];
+    let v = b;
+    if (a === 'projects') {
+      if (/^[+-]/.test(b)) {
+        const repo = b.slice(1).trim();
+        v = b[0] === '+' ? [...new Set([...cur, repo])] : cur.filter((x) => x !== repo);
+      } else {
+        v = b.split(',').map((s) => s.trim()).filter(Boolean);
+      }
+    }
+    if (v === '' || (Array.isArray(v) && !v.length)) delete all[name][a];
+    else all[name][a] = v;
+  }
+  save();
+  const { password, key, passphrase, hostkey, ...shown } = all[name];
+  const ok = shown.host && shown.user && (password || key);
+  console.log(`${name} = ${JSON.stringify(shown)}${ok ? '' : ' (접속정보 미입력)'}`);
+}
+
+// 인자 없이 실행하면 별칭 목록 (비밀번호·키 제외), 현재 프로젝트를 쓰는 별칭에 * 표시
+function cmdList() {
+  const git = (cmd) => {
+    try {
+      return execSync(`git ${cmd}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    } catch (e) {
+      return '';
+    }
+  };
+  const url = git('remote get-url origin');
+  const repo = url ? url.replace(/\.git$/, '').split(/[/:]/).pop() : path.basename(git('rev-parse --show-toplevel') || process.cwd());
+  console.log(`현재 프로젝트: ${repo}`);
+  console.log(['', '별칭', 'host', 'user', '인증', 'root', '프로젝트', '설명'].join('\t'));
+  for (const [k, c] of Object.entries(all)) {
+    const mark = repo && (c.projects || []).includes(repo) ? '*' : '';
+    const auth = c.key ? '키' : c.password ? '비밀번호' : c.host ? 'agent' : '';
+    console.log([mark, k, c.host, c.user, auth, c.root, (c.projects || []).join(','), c.desc].map((v) => (v == null ? '' : v)).join('\t'));
+  }
+}
+
+async function main() {
+  const [a0, a1, a2, a3] = argv;
+  if (!a0) return cmdList();
+  switch (a0) {
+    case 'get': return cmdGet(a1, a2);
+    case 'diff': return cmdDiff(a1, a2, a3);
+    case 'put': return cmdPut(a1, a2, a3);
+    case 'restore': return cmdRestore(a1, a2, a3);
+    case 'exec': return cmdRun(a1, a2, false);
+    case 'set':
+    case 'new': return cmdSetNew(a0, a1, a2, a3);
+    default:
+      if (CMDS.includes(a0)) fail(USAGE);
+      return cmdRun(a0, a1, true);
+  }
+}
+
+main().catch((e) => fail(e.message || e.code || String(e)));
