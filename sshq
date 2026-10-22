@@ -11,6 +11,8 @@ const LIB = path.join(DIR, 'node_modules');
 const FILE = path.join(DIR, 'sshq.json');
 const WORK = path.join(DIR, 'work');
 const MAX_LINES = 2000;
+// 원격 백업은 웹에서 열리지 않도록 홈의 이 폴더 아래에 원래 경로 그대로 둔다
+const BAK_DIR = '_sshq_backup';
 const EDITABLE = ['root', 'projects', 'desc'];
 
 const fail = (msg, code = 1) => { console.error(msg); process.exit(code); };
@@ -21,7 +23,7 @@ const USAGE = `사용법:
   sshq <별칭> "<명령>"                    조회 명령 실행 (ls, cat, grep, tail, find ...)
   sshq get <별칭> <원격경로>              원격 파일을 work/<별칭>/ 아래로 내려받기
   sshq diff <별칭> <원격경로> [로컬경로]   원격 파일과 로컬 사본 비교
-  sshq put <별칭> <원격경로> [로컬경로]    원격 파일을 .bak_<시각>으로 백업한 뒤 업로드
+  sshq put <별칭> <원격경로> [로컬경로]    원격 파일을 ~/${BAK_DIR}/ 아래에 백업한 뒤 업로드
   sshq restore <별칭> <원격경로> [백업]    백업으로 되돌리기 (생략 시 가장 최근 백업)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
   sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 삭제
@@ -178,13 +180,13 @@ const exists = (sftp, p) => pcall((cb) => sftp.stat(p, cb)).then((st) => st, () 
 const download = (sftp, rp, lp) => pcall((cb) => sftp.fastGet(rp, lp, cb)).catch((e) => {
   throw new Error(`원격 파일을 받을 수 없습니다: ${rp} (${e.message})`);
 });
-async function mkdirp(sftp, dir) {
+async function mkdirp(sftp, dir, mode) {
   const parts = dir.split('/');
   let cur = dir.startsWith('/') ? '' : '.';
   for (const part of parts) {
     if (!part || part === '.') continue;
     cur = cur === '.' ? part : `${cur}/${part}`;
-    if (!(await exists(sftp, cur))) await pcall((cb) => sftp.mkdir(cur, cb));
+    if (!(await exists(sftp, cur))) await pcall((cb) => sftp.mkdir(cur, mode ? { mode } : {}, cb));
   }
 }
 
@@ -250,8 +252,12 @@ async function cmdDiff(alias, p, local) {
   else printOut(r.stdout);
 }
 
+// 원격 파일의 백업 이름 앞부분 (홈 기준 상대경로): www/a.php → _sshq_backup/www/a.php
+const bakBase = (rp) => path.posix.join(BAK_DIR, rp.replace(/^\/+/, ''));
+
 async function backup(conn, sftp, rp, tag) {
-  const bak = `${rp}.bak_${ts()}${tag || ''}`;
+  const bak = `${bakBase(rp)}.bak_${ts()}${tag || ''}`;
+  await mkdirp(sftp, path.posix.dirname(bak), 0o700);
   const r = await run(conn, `cp -p -- ${q(rp)} ${q(bak)}`);
   if (r.code !== 0) {
     // cp를 못 쓰는 서버(SFTP 전용)는 SFTP로 복사
@@ -283,7 +289,7 @@ async function cmdPut(alias, p, local) {
     const now = await exists(sftp, rp);
     if (!now || now.size !== fs.statSync(lp).size) throw new Error(`업로드 확인 실패: ${rp}`);
     console.log(`업로드: ${lp} → ${rp} (${now.size} bytes)`);
-    console.log(bak ? `백업: ${bak}\n되돌리기: sshq restore ${alias} ${p}` : '새 파일 (백업 없음)');
+    console.log(bak ? `백업: ~/${bak}\n되돌리기: sshq restore ${alias} ${p}` : '새 파일 (백업 없음)');
   } finally {
     conn.end();
   }
@@ -297,9 +303,9 @@ async function cmdRestore(alias, p, bakArg) {
     const sftp = await sftpOf(conn);
     let bak = bakArg ? remotePath(c, bakArg) : '';
     if (!bak) {
-      const r = await run(conn, `ls -1t -- ${q(rp)}.bak_* 2>/dev/null`);
+      const r = await run(conn, `ls -1t -- ${q(bakBase(rp))}.bak_* 2>/dev/null`);
       const list = r.out.split('\n').filter((l) => l && !l.endsWith('_before_restore'));
-      if (!list.length) fail(`백업 없음: ${rp}.bak_*`);
+      if (!list.length) fail(`백업 없음: ~/${bakBase(rp)}.bak_*`);
       bak = list[0];
     }
     if (!(await exists(sftp, bak))) fail(`백업 없음: ${bak}`);
@@ -312,8 +318,9 @@ async function cmdRestore(alias, p, bakArg) {
       await pcall((cb) => sftp.fastPut(tmp, rp, cb));
       fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
     }
-    console.log(`되돌림: ${bak} → ${rp}`);
-    if (cur) console.log(`되돌리기 전 상태 백업: ${cur}`);
+    const shown = (b) => (b.startsWith('/') ? b : `~/${b}`);
+    console.log(`되돌림: ${shown(bak)} → ${rp}`);
+    if (cur) console.log(`되돌리기 전 상태 백업: ${shown(cur)}`);
   } finally {
     conn.end();
   }
