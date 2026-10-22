@@ -27,11 +27,12 @@ const USAGE = `사용법:
   sshq put <별칭> <원격경로> [로컬경로]    원격 파일을 ~/${BAK_DIR}/ 아래에 백업한 뒤 업로드
   sshq restore <별칭> <원격경로> [백업]    백업으로 되돌리기 (생략 시 가장 최근 백업)
   sshq del <별칭> <원격경로>              지우지 않고 ~/${DEL_DIR}/ 아래로 옮기기
+  sshq clean <별칭> [원격경로]            work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
   sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 삭제
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)`;
 
-const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'exec', 'set', 'new', 'help'];
+const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'exec', 'set', 'new', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -395,6 +396,20 @@ async function cmdDel(alias, p) {
   }
 }
 
+// 로컬 사본만 지운다 (서버는 건드리지 않음). 범위는 work/<별칭>/ 안
+function cmdClean(alias, p) {
+  if (!alias) fail('사용법: sshq clean <별칭> [원격경로]');
+  const base = path.join(WORK, alias);
+  if (path.dirname(base) !== WORK) fail(`잘못된 별칭: ${alias}`);
+  const lp = p ? localPath(alias, remotePath(all[alias] || {}, p)) : base;
+  if (!fs.existsSync(lp)) return console.log(`지울 사본 없음: ${lp}`);
+  const n = fs.statSync(lp).isDirectory()
+    ? fs.readdirSync(lp, { recursive: true, withFileTypes: true }).filter((d) => d.isFile()).length
+    : 1;
+  fs.rmSync(lp, { recursive: true, force: true });
+  console.log(`지움: ${lp} (파일 ${n}개)`);
+}
+
 function cmdSetNew(cmd, name, a, b) {
   if (cmd === 'new') {
     if (!name) fail('사용법: sshq new <별칭> [root] [설명]');
@@ -453,6 +468,7 @@ async function main() {
     case 'put': return cmdPut(a1, a2, a3);
     case 'restore': return cmdRestore(a1, a2, a3);
     case 'del': return cmdDel(a1, a2);
+    case 'clean': return cmdClean(a1, a2);
     case 'exec': return cmdRun(a1, a2, false);
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
