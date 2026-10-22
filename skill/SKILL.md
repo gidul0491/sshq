@@ -42,7 +42,7 @@ sshq new <별칭> [root] [설명]             # 새 서버 양식 추가 (접속
 
 ## exec를 쓰는 경우
 - 조회 명령으로 안 되는 것만 쓴다: 압축 백업, 디렉터리 생성, 권한 확인용 복합 명령 등.
-- 삭제(`rm`, `rmdir`), 원본을 덮어쓰는 `mv`, 서비스 재시작, 패키지 설치, `chmod -R`/`chown -R`, crontab 수정, DB 쓰기는 사용자가 명시적으로 요청한 경우에만 한다. 삭제가 필요하면 원래 경로 그대로 서버 홈의 `~/_sshq_to_delete/`로 옮긴다. 예: `www/a.php` → `~/_sshq_to_delete/www/a.php`
+- 삭제(`rm`, `rmdir`), 원본을 덮어쓰는 `mv`, 서비스 재시작, 패키지 설치, `chmod -R`/`chown -R`, crontab 수정, DB 쓰기는 사용자가 명시적으로 요청한 경우에만 한다. 삭제가 필요하면 원래 경로 그대로 서버 홈의 `~/_sshq_to_delete/`로 옮긴다. 예: `www/a.php` → `~/_sshq_to_delete/www/a.php`. 이 폴더를 처음 만들면 `chmod 700 ~/_sshq_to_delete`로 본인만 열 수 있게 한다.
 - exec 명령은 Claude Code가 실행 전에 사용자 승인을 받는다. 무엇을 왜 하는지 한 줄로 먼저 말한다.
 
 ## 설정을 직접 고치는 경우
