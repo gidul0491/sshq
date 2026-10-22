@@ -43,7 +43,7 @@ sshq clean <별칭> [원격경로]              # work/<별칭>/의 로컬 사�
 sshq backup <별칭> [원격폴더]             # backup/<별칭>/에 tar.gz로 받기, 생략 시 홈 전체
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
-sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 삭제
+sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 ```
 

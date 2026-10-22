@@ -32,7 +32,7 @@ const USAGE = `사용법:
   sshq clean <별칭> [원격경로]            work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
   sshq backup <별칭> [원격폴더]           폴더를 backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
-  sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 삭제
+  sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 비우기
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)`;
 
 const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'exec', 'set', 'new', 'help'];
@@ -44,6 +44,12 @@ try {
   all = JSON.parse(fs.readFileSync(FILE, 'utf8'));
 } catch (e) {
   fail(`sshq.json 오류: ${e.message}`);
+}
+// 빠진 항목만 빈칸으로 채운다 (있는 값은 그대로). 다음 저장 때 파일에도 반영된다
+for (const c of Object.values(all)) {
+  c.root ??= '';
+  c.projects ??= [];
+  c.desc ??= '';
 }
 const save = () => fs.writeFileSync(FILE, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
 
@@ -491,8 +497,7 @@ function cmdSetNew(cmd, name, a, b) {
   if (cmd === 'new') {
     if (!name) fail('사용법: sshq new <별칭> [root] [설명]');
     if (all[name]) fail(`이미 있는 별칭: ${name}`);
-    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '' };
-    if (b) all[name].desc = b;
+    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '', projects: [], desc: b || '' };
   } else {
     if (!name || !a || b === undefined) fail(`사용법: sshq set <별칭> <${EDITABLE.join('|')}> <값>`);
     if (!all[name]) fail(`별칭 없음: ${name} (있는 별칭: ${Object.keys(all).join(', ')})`);
@@ -507,8 +512,7 @@ function cmdSetNew(cmd, name, a, b) {
         v = b.split(',').map((s) => s.trim()).filter(Boolean);
       }
     }
-    if (v === '' || (Array.isArray(v) && !v.length)) delete all[name][a];
-    else all[name][a] = v;
+    all[name][a] = v;
   }
   save();
   const { password, key, passphrase, hostkey, ...shown } = all[name];
