@@ -11,8 +11,9 @@ const LIB = path.join(DIR, 'node_modules');
 const FILE = path.join(DIR, 'sshq.json');
 const WORK = path.join(DIR, 'work');
 const MAX_LINES = 2000;
-// 원격 백업은 웹에서 열리지 않도록 홈의 이 폴더 아래에 원래 경로 그대로 둔다
+// 원격 백업과 지울 파일은 웹에서 열리지 않도록 홈의 이 폴더들 아래에 원래 경로 그대로 둔다 (권한 700)
 const BAK_DIR = '_sshq_backup';
+const DEL_DIR = '_sshq_to_delete';
 const EDITABLE = ['root', 'projects', 'desc'];
 
 const fail = (msg, code = 1) => { console.error(msg); process.exit(code); };
@@ -25,11 +26,12 @@ const USAGE = `사용법:
   sshq diff <별칭> <원격경로> [로컬경로]   원격 파일과 로컬 사본 비교
   sshq put <별칭> <원격경로> [로컬경로]    원격 파일을 ~/${BAK_DIR}/ 아래에 백업한 뒤 업로드
   sshq restore <별칭> <원격경로> [백업]    백업으로 되돌리기 (생략 시 가장 최근 백업)
+  sshq del <별칭> <원격경로>              지우지 않고 ~/${DEL_DIR}/ 아래로 옮기기
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
   sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 삭제
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)`;
 
-const CMDS = ['get', 'diff', 'put', 'restore', 'exec', 'set', 'new', 'help'];
+const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'exec', 'set', 'new', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -180,6 +182,7 @@ const exists = (sftp, p) => pcall((cb) => sftp.stat(p, cb)).then((st) => st, () 
 const download = (sftp, rp, lp) => pcall((cb) => sftp.fastGet(rp, lp, cb)).catch((e) => {
   throw new Error(`원격 파일을 받을 수 없습니다: ${rp} (${e.message})`);
 });
+// mode를 주면 새로 만드는 폴더와 홈 기준 맨 위 폴더(이미 있어도)에 그 권한을 준다
 async function mkdirp(sftp, dir, mode) {
   const parts = dir.split('/');
   let cur = dir.startsWith('/') ? '' : '.';
@@ -188,6 +191,8 @@ async function mkdirp(sftp, dir, mode) {
     cur = cur === '.' ? part : `${cur}/${part}`;
     if (!(await exists(sftp, cur))) await pcall((cb) => sftp.mkdir(cur, mode ? { mode } : {}, cb));
   }
+  const top = parts.find((x) => x && x !== '.');
+  if (mode && top && !dir.startsWith('/')) await pcall((cb) => sftp.chmod(top, mode, cb));
 }
 
 function printOut(out) {
@@ -252,8 +257,9 @@ async function cmdDiff(alias, p, local) {
   else printOut(r.stdout);
 }
 
-// 원격 파일의 백업 이름 앞부분 (홈 기준 상대경로): www/a.php → _sshq_backup/www/a.php
-const bakBase = (rp) => path.posix.join(BAK_DIR, rp.replace(/^\/+/, ''));
+// 원격 경로를 홈 기준 보관 폴더 아래 같은 경로로: www/a.php → _sshq_backup/www/a.php
+const under = (dir, rp) => path.posix.join(dir, rp.replace(/^\/+/, ''));
+const bakBase = (rp) => under(BAK_DIR, rp);
 
 async function backup(conn, sftp, rp, tag) {
   const bak = `${bakBase(rp)}.bak_${ts()}${tag || ''}`;
@@ -326,6 +332,27 @@ async function cmdRestore(alias, p, bakArg) {
   }
 }
 
+// 지우지 않고 ~/_sshq_to_delete/<원래 경로>로 옮긴다. 같은 이름이 있으면 뒤에 _<시각>을 붙인다
+async function cmdDel(alias, p) {
+  const c = conf(alias);
+  const rp = remotePath(c, p);
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    const st = await exists(sftp, rp);
+    if (!st) fail(`원격 파일 없음: ${rp}`);
+    let dest = under(DEL_DIR, rp);
+    if (await exists(sftp, dest)) dest += `_${ts()}`;
+    await mkdirp(sftp, path.posix.dirname(dest), 0o700);
+    await pcall((cb) => sftp.rename(rp, dest, cb));
+    const moved = await exists(sftp, dest);
+    if (!moved || (await exists(sftp, rp)) || moved.size !== st.size) throw new Error(`옮기기 확인 실패: ${rp} → ~/${dest}`);
+    console.log(`옮김: ${rp} → ~/${dest}`);
+  } finally {
+    conn.end();
+  }
+}
+
 function cmdSetNew(cmd, name, a, b) {
   if (cmd === 'new') {
     if (!name) fail('사용법: sshq new <별칭> [root] [설명]');
@@ -383,6 +410,7 @@ async function main() {
     case 'diff': return cmdDiff(a1, a2, a3);
     case 'put': return cmdPut(a1, a2, a3);
     case 'restore': return cmdRestore(a1, a2, a3);
+    case 'del': return cmdDel(a1, a2);
     case 'exec': return cmdRun(a1, a2, false);
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);

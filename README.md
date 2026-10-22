@@ -23,7 +23,7 @@ git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 
 ```
 "allow": [ "Bash(sshq *)", "Edit(~/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq put *)", "Bash(sshq restore *)", "Bash(sshq exec *)" ],
+"ask":   [ "Bash(sshq put *)", "Bash(sshq restore *)", "Bash(sshq del *)", "Bash(sshq exec *)" ],
 "deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)" ]
 ```
 
@@ -38,6 +38,7 @@ sshq get <별칭> <원격경로>                # work/<별칭>/ 아래로 내�
 sshq diff <별칭> <원격경로> [로컬경로]     # 원격 파일과 로컬 사본 비교
 sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드 (승인)
 sshq restore <별칭> <원격경로> [백업]      # 백업으로 되돌리기, 생략 시 가장 최근 백업 (승인)
+sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_delete/ 아래로 옮기기 (승인)
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 삭제
@@ -49,7 +50,9 @@ sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 - `put`은 업로드 전에 원격 파일을 `cp -p`로 백업하고 크기를 확인한다. 백업이 확인되지 않으면 업로드하지 않는다. 원래 파일 권한은 유지한다.
 - 백업은 웹에서 열리지 않도록 서버 홈의 `~/_sshq_backup/` 아래에 원래 경로 그대로 둔다. 예: `www/a.php` → `~/_sshq_backup/www/a.php.bak_<시각>`
 - `restore`는 되돌리기 직전 상태도 `~/_sshq_backup/` 아래에 `.bak_<시각>_before_restore`로 남긴다.
-- 지울 파일은 `rm` 대신 서버 홈의 `~/_sshq_to_delete/`로 옮긴다. 두 폴더 모두 권한은 700(본인만)이다.
+- `del`은 지우지 않고 서버 홈의 `~/_sshq_to_delete/` 아래 원래 경로로 옮긴다. 같은 이름이 있으면 뒤에 `_<시각>`을 붙인다. 옮긴 뒤 원래 자리에서 사라졌는지 확인한다.
+- `~/_sshq_backup`, `~/_sshq_to_delete` 폴더 권한은 sshq가 700(본인만)으로 맞춘다.
+- `~/`로 시작하는 원격경로는 로컬 셸이 바꾸지 않도록 `'~/...'`처럼 따옴표로 감싼다.
 - 출력은 최대 2000줄.
 
 ## 업데이트
