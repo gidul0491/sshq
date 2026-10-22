@@ -34,6 +34,7 @@ git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 ```
 sshq                                     # 별칭 목록 (현재 프로젝트를 쓰는 별칭에 *)
 sshq <별칭> "<명령>"                      # 조회 명령 실행 (root 폴더에서)
+sshq ls <별칭> [원격경로]                 # 폴더 목록 (명령 실행이 막힌 서버에서도 됨)
 sshq get <별칭> <원격경로>                # work/<별칭>/ 아래로 내려받기 (폴더도 가능)
 sshq diff <별칭> <원격경로> [로컬경로]     # 원격 파일과 로컬 사본 비교
 sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드
