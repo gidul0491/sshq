@@ -3,6 +3,7 @@
 // 접속정보·라이브러리는 이 스크립트가 있는 폴더 기준 (sshq.json, node_modules, work/)
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');
 const path = require('path');
 const { spawn, spawnSync, execSync } = require('child_process');
 
@@ -10,6 +11,7 @@ const DIR = path.dirname(fs.realpathSync(__filename));
 const LIB = path.join(DIR, 'node_modules');
 const FILE = path.join(DIR, 'sshq.json');
 const WORK = path.join(DIR, 'work');
+const BACKUP = path.join(DIR, 'backup');
 const MAX_LINES = 2000;
 // 원격 백업과 지울 파일은 웹에서 열리지 않도록 홈의 이 폴더들 아래에 원래 경로 그대로 둔다 (권한 700)
 const BAK_DIR = '_sshq_backup';
@@ -28,11 +30,12 @@ const USAGE = `사용법:
   sshq restore <별칭> <원격경로> [백업]    백업으로 되돌리기 (생략 시 가장 최근 백업)
   sshq del <별칭> <원격경로>              지우지 않고 ~/${DEL_DIR}/ 아래로 옮기기
   sshq clean <별칭> [원격경로]            work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
+  sshq backup <별칭> [원격폴더]           폴더를 backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
   sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 삭제
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)`;
 
-const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'exec', 'set', 'new', 'help'];
+const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'exec', 'set', 'new', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -396,6 +399,80 @@ async function cmdDel(alias, p) {
   }
 }
 
+// tar.gz 안의 파일(폴더 제외) 수를 직접 센다. 맥 tar -t는 ._ 파일을 숨겨서 쓰지 않는다
+function countTar(file) {
+  return new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0);
+    let skip = 0;
+    let n = 0;
+    let done = false;
+    const gz = fs.createReadStream(file).pipe(zlib.createGunzip());
+    gz.on('data', (d) => {
+      buf = buf.length ? Buffer.concat([buf, d]) : d;
+      let off = 0;
+      while (!done) {
+        if (skip) {
+          const s = Math.min(skip, buf.length - off);
+          off += s;
+          skip -= s;
+          if (skip) break;
+        }
+        if (buf.length - off < 512) break;
+        const h = buf.subarray(off, off + 512);
+        off += 512;
+        if (h.every((b) => b === 0)) { done = true; break; }
+        const size = h[124] & 0x80 ? Number(h.readBigUInt64BE(128)) : parseInt(h.toString('ascii', 124, 136).replace(/\0.*$/, '').trim() || '0', 8);
+        if (!'5LKxgD'.includes(String.fromCharCode(h[156]))) n++;
+        skip = Math.ceil(size / 512) * 512;
+      }
+      buf = buf.subarray(off);
+    });
+    gz.on('end', () => resolve(n));
+    gz.on('error', reject);
+  });
+}
+
+// 서버 폴더를 tar.gz 하나로 받아 그대로 보관한다 (풀지 않음, clean 대상 아님)
+// 폴더를 생략하면 홈 전체, 홈 전체일 때는 sshq 백업·삭제 폴더를 뺀다
+async function cmdBackup(alias, p) {
+  const c = conf(alias);
+  const rp = p ? remotePath(c, p) : '.';
+  const ex = rp === '.' ? [BAK_DIR, DEL_DIR] : [];
+  const out = path.join(BACKUP, alias, `${alias}_${rp === '.' ? 'home' : rp.replace(/^\/+/, '').replace(/\//g, '_')}_${ts()}.tar.gz`);
+  fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    const st = await exists(sftp, rp);
+    if (!st || !st.isDirectory()) fail(`원격 폴더 없음: ${rp}`);
+    const tarEx = ex.map((d) => `--exclude=${q(`./${d}`)}`).join(' ');
+    const warn = await new Promise((resolve, reject) => {
+      conn.exec(`tar czf - ${tarEx} -C ${q(rp)} .`, (err, stream) => {
+        if (err) return reject(new Error(`백업을 만들 수 없습니다 (${err.message})`));
+        const file = fs.createWriteStream(out, { mode: 0o600 });
+        let w = '';
+        stream.stderr.on('data', (d) => { w += d; });
+        stream.pipe(file);
+        file.on('finish', () => resolve(w));
+        file.on('error', reject);
+      });
+    });
+    const prune = ex.map((d) => `-path ${q(`./${d}`)} -prune -o`).join(' ');
+    const r = await run(conn, `cd ${q(rp)} && find . ${prune} ! -type d -print | wc -l`);
+    const remote = Number(r.out.trim());
+    const local = await countTar(out).catch(() => { throw new Error(`백업 파일이 손상되었습니다: ${out}`); });
+    const mb = (fs.statSync(out).size / 1048576).toFixed(1);
+    console.log(`백업: ${rp === '.' ? '~' : rp} → ${out} (${mb}MB, 파일 ${local}개 / 서버 ${remote}개)`);
+    if (warn) process.stderr.write(warn);
+    if (local !== remote) {
+      console.error('서버 파일 수와 다릅니다. 위 경고에서 빠진 파일을 확인하세요.');
+      process.exitCode = 1;
+    }
+  } finally {
+    conn.end();
+  }
+}
+
 // 로컬 사본만 지운다 (서버는 건드리지 않음). 범위는 work/<별칭>/ 안
 function cmdClean(alias, p) {
   if (!alias) fail('사용법: sshq clean <별칭> [원격경로]');
@@ -469,6 +546,7 @@ async function main() {
     case 'restore': return cmdRestore(a1, a2, a3);
     case 'del': return cmdDel(a1, a2);
     case 'clean': return cmdClean(a1, a2);
+    case 'backup': return cmdBackup(a1, a2);
     case 'exec': return cmdRun(a1, a2, false);
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
