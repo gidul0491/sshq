@@ -33,9 +33,11 @@ const USAGE = `사용법:
   sshq backup <별칭> [원격폴더]           폴더를 backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
   sshq set <별칭> <root|projects|desc> <값>   수정, 빈 값("")이면 비우기
-  sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)`;
+  sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)
+  sshq version                           설치된 버전과 새 버전 확인
+  sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'exec', 'set', 'new', 'help'];
+const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'exec', 'set', 'new', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -520,6 +522,46 @@ function cmdSetNew(cmd, name, a, b) {
   console.log(`${name} = ${JSON.stringify(shown)}${ok ? '' : ' (접속정보 미입력)'}`);
 }
 
+// ---------- 버전 ----------
+// sshq 저장소(DIR)의 git으로 설치된 버전과 원격(origin)의 새 커밋을 비교한다
+const gitDir = (...args) => {
+  const r = spawnSync('git', ['-C', DIR, ...args], { encoding: 'utf8' });
+  return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
+};
+function versionState() {
+  const f = gitDir('fetch', '-q', 'origin');
+  if (!f.ok) fail(`새 버전을 확인할 수 없습니다: ${f.err}`);
+  const [ahead, behind] = gitDir('rev-list', '--left-right', '--count', 'HEAD...@{u}').out.split(/\s+/).map(Number);
+  return {
+    cur: gitDir('log', '-1', '--format=%h %cd %s', '--date=format:%Y-%m-%d').out,
+    ahead,
+    behind,
+    dirty: gitDir('status', '--porcelain', '--untracked-files=no').out,
+    news: behind ? gitDir('log', '--format=  %h %s', 'HEAD..@{u}').out : '',
+  };
+}
+function cmdVersion() {
+  const v = versionState();
+  console.log(`설치된 버전: ${v.cur}`);
+  if (v.behind) console.log(`새 버전 ${v.behind}개 (sshq update로 업데이트):\n${v.news}`);
+  else console.log('최신 버전입니다.');
+  if (v.ahead) console.log(`올리지 않은 로컬 커밋 ${v.ahead}개`);
+  if (v.dirty) console.log(`로컬에서 고친 파일:\n${v.dirty}`);
+}
+function cmdUpdate() {
+  const v = versionState();
+  if (!v.behind) return console.log(`최신 버전입니다: ${v.cur}`);
+  if (v.dirty) fail(`로컬에서 고친 파일이 있어 업데이트를 멈춥니다:\n${v.dirty}`);
+  if (v.ahead) fail(`올리지 않은 로컬 커밋 ${v.ahead}개가 있어 업데이트를 멈춥니다.`);
+  const p = gitDir('merge', '--ff-only', '@{u}');
+  if (!p.ok) fail(`업데이트 실패: ${p.err}`);
+  // 지금 실행 중인 node로 다시 설치해 런처의 node가 바뀌지 않게 한다
+  const env = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };
+  const i = spawnSync(path.join(DIR, 'install.sh'), { cwd: DIR, env, encoding: 'utf8' });
+  if (i.status !== 0) fail(`설치 실패:\n${i.stdout}${i.stderr}`);
+  console.log(`업데이트 완료: ${v.cur} → ${gitDir('log', '-1', '--format=%h %cd %s', '--date=format:%Y-%m-%d').out}\n${v.news}`);
+}
+
 // 인자 없이 실행하면 별칭 목록 (비밀번호·키 제외), 현재 프로젝트를 쓰는 별칭에 * 표시
 function cmdList() {
   const git = (cmd) => {
@@ -551,6 +593,8 @@ async function main() {
     case 'del': return cmdDel(a1, a2);
     case 'clean': return cmdClean(a1, a2);
     case 'backup': return cmdBackup(a1, a2);
+    case 'version': return cmdVersion();
+    case 'update': return cmdUpdate();
     case 'exec': return cmdRun(a1, a2, false);
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
