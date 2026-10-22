@@ -45,6 +45,8 @@ sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
+sshq version                             # 설치된 버전과 새 버전 확인
+sshq update                              # 새 버전으로 업데이트
 ```
 
 - `projects`에는 프로젝트 이름을 넣는다. git `origin` 저장소 이름 → git 최상위 폴더 이름 → 현재 폴더 이름 순으로 정해지고, `sshq` 첫 줄에 나온다.
@@ -62,5 +64,8 @@ sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 ## 업데이트
 
 ```
-cd ~/git/sshq && git pull && ./install.sh
+sshq version
+sshq update
 ```
+
+`update`는 새 커밋을 받은 뒤 지금 쓰는 node로 `install.sh`를 다시 실행한다. 로컬에서 고친 파일이나 올리지 않은 커밋이 있으면 멈춘다.
