@@ -9,7 +9,11 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
   exit 1
 fi
 
-cd "$DIR" && npm ci --silent
+# 라이브러리 목록(package-lock.json)이 바뀌었을 때만 다시 설치
+cd "$DIR"
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+  npm ci --silent
+fi
 
 mkdir -p ~/.local/bin ~/.claude/skills "$DIR/work"
 # 프로젝트마다 .nvmrc로 node가 바뀌어도 설치할 때의 node로 실행되게 고정

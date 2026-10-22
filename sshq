@@ -526,7 +526,7 @@ function cmdSetNew(cmd, name, a, b) {
 // sshq 저장소(DIR)의 git으로 설치된 버전과 원격(origin)의 새 커밋을 비교한다
 const gitDir = (...args) => {
   const r = spawnSync('git', ['-C', DIR, ...args], { encoding: 'utf8' });
-  return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
+  return { ok: r.status === 0, out: (r.stdout || '').trimEnd(), err: (r.stderr || '').trim() };
 };
 function versionState() {
   const f = gitDir('fetch', '-q', 'origin');
