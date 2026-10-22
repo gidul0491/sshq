@@ -4,7 +4,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync, execSync } = require('child_process');
+const { spawn, spawnSync, execSync } = require('child_process');
 
 const DIR = path.dirname(fs.realpathSync(__filename));
 const LIB = path.join(DIR, 'node_modules');
@@ -22,7 +22,7 @@ if (Number(process.versions.node.split('.')[0]) < 22) fail(`Node 22 이상이 �
 const USAGE = `사용법:
   sshq                                   별칭 목록 (현재 프로젝트를 쓰는 별칭에 *)
   sshq <별칭> "<명령>"                    조회 명령 실행 (ls, cat, grep, tail, find ...)
-  sshq get <별칭> <원격경로>              원격 파일을 work/<별칭>/ 아래로 내려받기
+  sshq get <별칭> <원격경로>              원격 파일·폴더를 work/<별칭>/ 아래로 내려받기
   sshq diff <별칭> <원격경로> [로컬경로]   원격 파일과 로컬 사본 비교
   sshq put <별칭> <원격경로> [로컬경로]    원격 파일을 ~/${BAK_DIR}/ 아래에 백업한 뒤 업로드
   sshq restore <별칭> <원격경로> [백업]    백업으로 되돌리기 (생략 시 가장 최근 백업)
@@ -223,6 +223,39 @@ async function cmdRun(alias, cmd, checked) {
   }
 }
 
+// 폴더: 서버에서 tar로 묶어 한 번에 받고, tar를 못 쓰는 서버(SFTP 전용)는 파일마다 받는다
+function getDirTar(conn, rp, lp) {
+  return new Promise((resolve) => {
+    conn.exec(`tar czf - -C ${q(rp)} .`, (err, stream) => {
+      if (err) return resolve(false);
+      const x = spawn('tar', ['xzf', '-', '-C', lp], { stdio: ['pipe', 'ignore', 'ignore'] });
+      x.on('error', () => { stream.close(); resolve(false); });
+      x.stdin.on('error', () => {});
+      let warn = '';
+      stream.stderr.on('data', (d) => { warn += d; });
+      stream.pipe(x.stdin);
+      const remote = new Promise((r) => stream.on('close', r));
+      const local = new Promise((r) => x.on('close', r));
+      Promise.all([remote, local]).then(([, code]) => {
+        if (code === 0 && warn) process.stderr.write(warn);
+        resolve(code === 0);
+      });
+    });
+  });
+}
+async function getDirSftp(sftp, rp, lp) {
+  for (const e of await pcall((cb) => sftp.readdir(rp, cb))) {
+    const r = `${rp}/${e.filename}`;
+    const l = path.join(lp, e.filename);
+    if (e.attrs.isDirectory()) {
+      fs.mkdirSync(l, { recursive: true });
+      await getDirSftp(sftp, r, l);
+    } else if (e.attrs.isFile()) {
+      await download(sftp, r, l).catch((er) => console.error(`건너뜀: ${er.message}`));
+    }
+  }
+}
+
 async function cmdGet(alias, p) {
   const c = conf(alias);
   const rp = remotePath(c, p);
@@ -230,6 +263,15 @@ async function cmdGet(alias, p) {
   const conn = await connect(alias, c);
   try {
     const sftp = await sftpOf(conn);
+    const st = await exists(sftp, rp);
+    if (!st) fail(`원격 파일 없음: ${rp}`);
+    if (st.isDirectory()) {
+      fs.mkdirSync(lp, { recursive: true });
+      if (!(await getDirTar(conn, rp, lp))) await getDirSftp(sftp, rp, lp);
+      const n = fs.readdirSync(lp, { recursive: true, withFileTypes: true }).filter((d) => d.isFile()).length;
+      console.log(`${rp}/ → ${lp}/ (파일 ${n}개)`);
+      return;
+    }
     fs.mkdirSync(path.dirname(lp), { recursive: true });
     await download(sftp, rp, lp);
     console.log(`${rp} → ${lp}`);
