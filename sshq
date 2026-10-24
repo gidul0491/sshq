@@ -121,7 +121,10 @@ const ts = () => {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 };
-const home = (p) => (p && p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
+const WIN = process.platform === 'win32';
+const home = (p) => (p && /^~[/\\]/.test(p) ? path.join(os.homedir(), p.slice(2)) : p);
+// 로컬경로 인자: ~/는 홈 기준, 윈도우에서 Git Bash 형식(/c/...)은 C:/...로
+const localArg = (p) => path.resolve(WIN ? home(p).replace(/^\/([a-zA-Z])(?=\/|$)/, '$1:') : home(p));
 
 // write: 서버를 바꾸는 명령(put·restore·del·exec). readonly 별칭이면 거부한다
 function conf(alias, write) {
@@ -181,7 +184,8 @@ function connect(alias, c) {
     if (c.passphrase) opt.passphrase = c.passphrase;
   }
   if (c.password) opt.password = c.password;
-  if (!c.key && !c.password && process.env.SSH_AUTH_SOCK) opt.agent = process.env.SSH_AUTH_SOCK;
+  // 윈도우 OpenSSH의 ssh-agent는 소켓 대신 named pipe를 쓴다
+  if (!c.key && !c.password) opt.agent = process.env.SSH_AUTH_SOCK || (WIN ? '\\\\.\\pipe\\openssh-ssh-agent' : undefined);
   return new Promise((resolve, reject) => {
     const conn = new Client();
     conn.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => c.password || '')));
@@ -257,7 +261,8 @@ function getDirTar(conn, rp, lp) {
   return new Promise((resolve) => {
     conn.exec(`tar czf - -C ${q(rp)} .`, (err, stream) => {
       if (err) return resolve(false);
-      const x = spawn('tar', ['xzf', '-', '-C', lp], { stdio: ['pipe', 'ignore', 'ignore'] });
+      // -C 대신 cwd: Git Bash의 GNU tar는 -C C:\...의 C:를 원격 호스트로 읽는다
+      const x = spawn('tar', ['xzf', '-'], { cwd: lp, stdio: ['pipe', 'ignore', 'ignore'] });
       x.on('error', () => { stream.close(); resolve(false); });
       x.stdin.on('error', () => {});
       let warn = '';
@@ -309,11 +314,12 @@ async function cmdGet(alias, p) {
   }
 }
 
-// 로컬 폴더의 파일을 원격 같은 경로와 비교한다 (.DS_Store 제외). 크기가 같으면 내용까지 비교
+// 로컬 폴더의 파일을 원격 같은 경로와 비교한다 (OS가 만드는 파일 제외). 크기가 같으면 내용까지 비교
 // 원격에만 있는 파일은 보지 않는다 (지우지 않음)
+const LOCAL_JUNK = ['.DS_Store', 'Thumbs.db', 'desktop.ini'];
 async function compareDir(sftp, lp, rp) {
   const files = fs.readdirSync(lp, { recursive: true, withFileTypes: true })
-    .filter((d) => d.isFile() && d.name !== '.DS_Store')
+    .filter((d) => d.isFile() && !LOCAL_JUNK.includes(d.name))
     .map((d) => path.relative(lp, path.join(d.parentPath, d.name)).split(path.sep).join('/'))
     .sort();
   const res = { changed: [], created: [], same: [] };
@@ -333,7 +339,7 @@ async function compareDir(sftp, lp, rp) {
 async function cmdDiff(alias, p, local) {
   const c = conf(alias);
   const rp = remotePath(c, p);
-  const lp = local ? path.resolve(local) : localPath(alias, rp);
+  const lp = local ? localArg(local) : localPath(alias, rp);
   if (!fs.existsSync(lp)) fail(`로컬 파일 없음: ${lp} (먼저 sshq get ${alias} ${p})`);
   const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sshq-')), 'remote');
   const conn = await connect(alias, c);
@@ -349,10 +355,25 @@ async function cmdDiff(alias, p, local) {
   } finally {
     conn.end();
   }
-  const r = spawnSync('diff', ['-u', '--label', `원격:${rp}`, '--label', `로컬:${lp}`, tmp, lp], { encoding: 'utf8' });
+  const r = diffFiles(tmp, lp, `원격:${rp}`, `로컬:${lp}`);
+  const crlf = (f) => fs.readFileSync(f).includes('\r\n');
+  const eol = r.status !== 0 && !crlf(tmp) && crlf(lp);
   fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
   if (r.status === 0) console.log('차이 없음');
   else printOut(r.stdout);
+  if (eol) console.log('주의: 로컬 사본의 줄바꿈이 CRLF로 바뀌었습니다. 원격은 LF입니다. LF로 되돌린 뒤 올리세요.');
+}
+
+// diff가 없는 환경(윈도우 PowerShell 등)은 git diff --no-index로 비교하고 머리글을 diff -u처럼 바꾼다
+function diffFiles(a, b, la, lb) {
+  const r = spawnSync('diff', ['-u', '--label', la, '--label', lb, a, b], { encoding: 'utf8' });
+  if (!r.error) return r;
+  const g = spawnSync('git', ['diff', '--no-index', '--no-color', '--', a, b], { encoding: 'utf8' });
+  if (g.error) fail('diff나 git이 필요합니다.');
+  const lines = (g.stdout || '').split('\n');
+  const at = lines.findIndex((l) => l.startsWith('@@'));
+  const out = at < 0 ? g.stdout : [`--- ${la}`, `+++ ${lb}`, ...lines.slice(at)].join('\n');
+  return { status: g.status, stdout: out };
 }
 
 // 원격 경로를 홈 기준 보관 폴더 아래 같은 경로로: www/a.php → _sshq_backup/www/a.php
@@ -409,7 +430,7 @@ async function moveToDel(sftp, rp) {
 async function cmdPut(alias, p, local) {
   const c = conf(alias, true);
   const rp = remotePath(c, p);
-  const lp = local ? path.resolve(local) : localPath(alias, rp);
+  const lp = local ? localArg(local) : localPath(alias, rp);
   if (!fs.existsSync(lp)) fail(`로컬 파일 없음: ${lp}`);
   const conn = await connect(alias, c);
   try {
@@ -684,9 +705,11 @@ function cmdUpdate() {
   if (v.ahead) fail(`올리지 않은 로컬 커밋 ${v.ahead}개가 있어 업데이트를 멈춥니다.`);
   const p = gitDir('merge', '--ff-only', '@{u}');
   if (!p.ok) fail(`업데이트 실패: ${p.err}`);
-  // 지금 실행 중인 node로 다시 설치해 런처의 node가 바뀌지 않게 한다
-  const env = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };
-  const i = spawnSync(path.join(DIR, 'install.sh'), { cwd: DIR, env, encoding: 'utf8' });
+  // 지금 실행 중인 node로 다시 설치해 런처의 node가 바뀌지 않게 한다 (npm도 같은 node 폴더의 것을 쓰게 PATH 앞에)
+  // 윈도우는 키가 Path일 수 있다
+  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  const env = { ...process.env, [key]: `${path.dirname(process.execPath)}${path.delimiter}${process.env[key] || ''}` };
+  const i = spawnSync(process.execPath, [path.join(DIR, 'install.js')], { cwd: DIR, env, encoding: 'utf8' });
   if (i.status !== 0) fail(`설치 실패:\n${i.stdout}${i.stderr}`);
   console.log(`업데이트 완료: ${v.cur} → ${gitDir('log', '-1', '--format=%h %cd %s', '--date=format:%Y-%m-%d').out}\n${v.news}`);
 }

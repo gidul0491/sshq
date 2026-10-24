@@ -1,0 +1,4 @@
+# 윈도우에서 clone해도 줄 끝을 LF로 (CRLF면 sh가 install.sh를 실행하지 못한다)
+*.sh text eol=lf
+*.js text eol=lf
+sshq text eol=lf
