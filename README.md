@@ -8,12 +8,29 @@ Claude Code가 SSH로 서버를 직접 조회하고, 필요하면 백업한 뒤 
 
 ## 설치
 
-Node 22 이상이 필요하다. `install.sh`를 실행할 때의 node로 고정되므로 프로젝트의 `.nvmrc`와 상관없이 동작한다. 그 node 버전을 지우거나 바꾸면 `install.sh`를 다시 실행한다.
+Node 22 이상이 필요하다. 설치할 때의 node로 고정되므로 프로젝트의 `.nvmrc`나 `nvm use`와 상관없이 동작한다. 그 node 버전을 지우면 설치를 다시 실행한다.
 
 ```
 git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 ~/git/sshq/install.sh
 ```
+
+### Windows
+
+PowerShell 또는 Git Bash에서 실행한다. bash가 없어도 된다.
+
+```
+git clone https://github.com/gidul0491/sshq.git $HOME\git\sshq
+node $HOME\git\sshq\install.js
+```
+
+- `~/.local/bin`에 Git Bash용 `sshq`와 PowerShell·cmd용 `sshq.cmd`를 만든다. PATH에 없으면 사용자 PATH에 넣는 PowerShell 명령을 알려 준다(Git Bash와 Claude Code에서도 함께 보인다).
+- 스킬은 junction으로 링크한다(관리자 권한 불필요).
+- nvm-windows는 `C:\nvm4w\nodejs` 링크가 아니라 실제 버전 폴더의 node로 고정한다.
+- `sshq.json`과 `work/`·`backup/`·`log/`는 상속 권한을 끊고 본인만 접근하게 한다. `C:\` 바로 아래 폴더는 기본으로 다른 사용자도 읽을 수 있다.
+- Git Bash에서 `/`로 시작하는 원격경로가 `C:/Program Files/Git/...`로 바뀌지 않게 실행기가 막는다.
+- 로컬 사본의 줄바꿈이 CRLF로 바뀌면 `diff`가 알려 준다. LF로 되돌린 뒤 올린다.
+- 키 없이 ssh-agent를 쓰면 Windows OpenSSH의 agent(`ssh-agent` 서비스)를 쓴다.
 
 1. `~/git/sshq/sshq.json`에 본인 접속정보를 입력한다. 별칭마다 하나씩, 형식은 `sshq.example.json` 참고.
    - 인증은 `password` 또는 `key`(개인키 파일 경로, 예: `~/.ssh/id_ed25519`) 중 하나를 채운다. 둘 다 비우면 ssh-agent를 쓴다.
@@ -28,6 +45,14 @@ git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 ```
 
 `allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기와 제한 없는 명령만 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열지 못하게 한다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
+
+Windows에서는 Claude Code가 PowerShell로 실행할 때를 위해 같은 규칙을 `PowerShell(...)`로도 넣는다. 경로는 `C:\git\sshq`라면 `//c/git/sshq/...` 형식으로 쓴다.
+
+```
+"allow": [ "Bash(sshq *)", "PowerShell(sshq *)", "Edit(//c/git/sshq/work/**)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)" ],
+"deny":  [ "Read(//c/git/sshq/sshq.json)", "Edit(//c/git/sshq/sshq.json)" ]
+```
 
 ## 사용
 
@@ -75,4 +100,4 @@ sshq version
 sshq update
 ```
 
-`update`는 새 커밋을 받은 뒤 지금 쓰는 node로 `install.sh`를 다시 실행한다. 로컬에서 고친 파일이나 올리지 않은 커밋이 있으면 멈춘다.
+`update`는 새 커밋을 받은 뒤 지금 쓰는 node로 설치(`install.js`)를 다시 실행한다. 로컬에서 고친 파일이나 올리지 않은 커밋이 있으면 멈춘다.

@@ -73,10 +73,12 @@ sshq update                              # 새 버전으로 업데이트
 - 접속정보 파일 `sshq.json`을 직접 읽거나 편집하지 않는다. `~/.ssh`의 키 파일도 읽지 않는다.
 - 서버의 설정 파일에서 읽은 비밀번호·키·토큰을 대화에 그대로 옮기지 않는다.
 - `sshq ...`는 단독 명령으로 실행한다. 파이프·`&&`·`;`로 로컬 명령과 묶으면 허용 규칙에 걸리지 않아 막힌다.
+- Windows에서는 Bash 도구(Git Bash)로 실행하는 것을 우선한다. PowerShell은 `sshq.cmd`를 거쳐 cmd가 인자를 다시 해석하므로 `"`·`%`가 든 명령은 Bash로 실행한다.
+- `diff`에 `줄바꿈이 CRLF로 바뀌었습니다`가 나오면 올리기 전에 로컬 사본을 LF로 되돌린다.
 - 접속 오류(Authentication failed, Timed out, 서버 지문 불일치, 접속정보 미입력 등)는 추측으로 고치지 말고 그대로 사용자에게 알린다. 서버 지문 불일치는 사용자가 확인하기 전까지 다시 시도하지 않는다.
 
 ## 파일 위치
-sshq 저장소 폴더(보통 `~/git/sshq`) 하나에 전부 있다. `~/.local/bin/sshq`는 이 폴더의 스크립트를 실행하는 런처, `~/.claude/skills/sshq`는 `skill` 폴더 링크다.
+sshq 저장소 폴더(보통 `~/git/sshq`) 하나에 전부 있다. `~/.local/bin/sshq`(Windows는 `sshq.cmd`도)는 이 폴더의 스크립트를 실행하는 런처, `~/.claude/skills/sshq`는 `skill` 폴더 링크다.
 - `sshq`: 스크립트
 - `sshq.json`: 접속정보 (git 제외, 각자 입력)
 - `work/`: `get`으로 내려받은 사본 (git 제외)
