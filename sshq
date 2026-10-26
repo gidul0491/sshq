@@ -28,6 +28,7 @@ if (Number(process.versions.node.split('.')[0]) < 22) fail(`Node 22 이상이 �
 const USAGE = `사용법:
   sshq                                   별칭 목록 (현재 프로젝트를 쓰는 별칭에 *)
   sshq <별칭> "<명령>"                    조회 명령 실행 (ls, cat, grep, tail, find ...)
+  sshq ls <별칭> [원격경로]               폴더 목록 (명령 실행이 막힌 SFTP 전용 서버에서도 됨)
   sshq get <별칭> <원격경로>              원격 파일·폴더를 work/<별칭>/ 아래로 내려받기
   sshq diff <별칭> <원격경로> [로컬경로]   원격과 로컬 사본 비교 (폴더면 바뀐 파일 목록)
   sshq put <별칭> <원격경로> [로컬경로]    원격을 ~/${BAK_DIR}/ 아래에 백업한 뒤 업로드 (폴더면 바뀐 파일만 묶음으로)
@@ -43,7 +44,7 @@ const USAGE = `사용법:
   sshq version                           설치된 버전과 새 버전 확인
   sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'log', 'exec', 'set', 'new', 'version', 'update', 'help'];
+const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'log', 'exec', 'set', 'new', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -232,6 +233,10 @@ function printOut(out) {
 
 const withCd = (c, cmd) => (c.root ? `cd ${q(c.root)} && ${cmd}` : cmd);
 
+// SFTP 전용 계정(셸 거부)인지 확인한다. 거부 문구는 서버마다 달라서 짧은 명령의 결과로 판단한다
+const shellOk = async (conn) => (await run(conn, 'echo sshq_ok').catch(() => ({ out: '' }))).out.trim() === 'sshq_ok';
+const NO_SHELL = '명령 실행이 막힌 서버입니다 (SFTP만 됨). 목록은 sshq ls, 파일은 get·diff·put·restore·del·backup을 쓰세요.';
+
 // ---------- 명령 ----------
 async function cmdRun(alias, cmd, checked) {
   const c = conf(alias, !checked);
@@ -243,6 +248,7 @@ async function cmdRun(alias, cmd, checked) {
   const conn = await connect(alias, c);
   try {
     const r = await run(conn, withCd(c, cmd));
+    if (r.code !== 0 && !(await shellOk(conn))) fail(NO_SHELL);
     printOut(r.out);
     if (r.err) process.stderr.write(r.err);
     process.exitCode = r.code;
@@ -272,16 +278,51 @@ function getDirTar(conn, rp, lp) {
     });
   });
 }
-async function getDirSftp(sftp, rp, lp) {
+// 파일마다 SFTP로 받는다 (권한·수정 시각 유지). skip: 받지 않을 맨 위 이름. 받은 파일 수와 못 받은 파일 수를 돌려준다
+async function getDirSftp(sftp, rp, lp, skip = []) {
+  const n = { ok: 0, fail: 0 };
   for (const e of await pcall((cb) => sftp.readdir(rp, cb))) {
+    if (skip.includes(e.filename)) continue;
     const r = `${rp}/${e.filename}`;
     const l = path.join(lp, e.filename);
     if (e.attrs.isDirectory()) {
       fs.mkdirSync(l, { recursive: true });
-      await getDirSftp(sftp, r, l);
+      const s = await getDirSftp(sftp, r, l);
+      n.ok += s.ok;
+      n.fail += s.fail;
     } else if (e.attrs.isFile()) {
-      await download(sftp, r, l).catch((er) => console.error(`건너뜀: ${er.message}`));
+      try {
+        await download(sftp, r, l);
+        fs.chmodSync(l, e.attrs.mode & 0o777);
+        fs.utimesSync(l, e.attrs.atime, e.attrs.mtime);
+        n.ok++;
+      } catch (er) {
+        console.error(`건너뜀: ${er.message}`);
+        n.fail++;
+      }
     }
+  }
+  return n;
+}
+
+// SFTP로 폴더 목록을 본다 (셸이 막힌 서버에서도 됨)
+async function cmdLs(alias, p) {
+  const c = conf(alias);
+  const rp = p ? remotePath(c, p) : c.root || '.';
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    const list = await pcall((cb) => sftp.readdir(rp, cb)).catch((e) => fail(`목록을 볼 수 없습니다: ${rp} (${e.message})`));
+    const day = (t) => new Date(t * 1000).toLocaleString('sv-SE').slice(0, 16);
+    const rows = list
+      .sort((a, b) => a.filename.localeCompare(b.filename))
+      .map((e) => {
+        const d = e.attrs.isDirectory();
+        return `${d ? 'd' : '-'} ${(e.attrs.mode & 0o777).toString(8)} ${String(e.attrs.size).padStart(10)} ${day(e.attrs.mtime)} ${e.filename}${d ? '/' : ''}`;
+      });
+    printOut(rows.join('\n') + '\n');
+  } finally {
+    conn.end();
   }
 }
 
@@ -296,7 +337,7 @@ async function cmdGet(alias, p) {
     if (!st) fail(`원격 파일 없음: ${rp}`);
     if (st.isDirectory()) {
       fs.mkdirSync(lp, { recursive: true });
-      if (!(await getDirTar(conn, rp, lp))) await getDirSftp(sftp, rp, lp);
+      if (!(await shellOk(conn)) || !(await getDirTar(conn, rp, lp))) await getDirSftp(sftp, rp, lp);
       const n = fs.readdirSync(lp, { recursive: true, withFileTypes: true }).filter((d) => d.isFile()).length;
       console.log(`${rp}/ → ${lp}/ (파일 ${n}개)`);
       return;
@@ -580,6 +621,27 @@ async function cmdBackup(alias, p) {
     const sftp = await sftpOf(conn);
     const st = await exists(sftp, rp);
     if (!st || !st.isDirectory()) fail(`원격 폴더 없음: ${rp}`);
+    if (!(await shellOk(conn))) {
+      // SFTP 전용: 파일마다 받아 로컬에서 tar.gz로 묶는다
+      const tmp = path.join(path.dirname(out), `.tmp_${ts()}`);
+      fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
+      try {
+        const n = await getDirSftp(sftp, rp, tmp, ex);
+        const t = spawnSync('tar', ['czf', out, '-C', tmp, '.'], { encoding: 'utf8' });
+        if (t.status !== 0) throw new Error(`백업 파일을 만들 수 없습니다: ${t.stderr}`);
+        fs.chmodSync(out, 0o600);
+        const local = await countTar(out);
+        const mb = (fs.statSync(out).size / 1048576).toFixed(1);
+        console.log(`백업(SFTP): ${rp === '.' ? '~' : rp} → ${out} (${mb}MB, 파일 ${local}개 / 서버 ${n.ok + n.fail}개)`);
+        if (n.fail || local !== n.ok + n.fail) {
+          console.error(`서버 파일 수와 다릅니다. 못 받은 파일 ${n.fail}개 (위 '건너뜀' 참고).`);
+          process.exitCode = 1;
+        }
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+      return;
+    }
     const tarEx = ex.map((d) => `--exclude=${q(`./${d}`)}`).join(' ');
     const warn = await new Promise((resolve, reject) => {
       conn.exec(`tar czf - ${tarEx} -C ${q(rp)} .`, (err, stream) => {
@@ -715,6 +777,7 @@ async function main() {
   const [a0, a1, a2, a3] = argv;
   if (!a0) return cmdList();
   switch (a0) {
+    case 'ls': return cmdLs(a1, a2);
     case 'get': return cmdGet(a1, a2);
     case 'diff': return cmdDiff(a1, a2, a3);
     case 'put': return cmdPut(a1, a2, a3);
