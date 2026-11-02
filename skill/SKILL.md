@@ -15,14 +15,17 @@ sshq diff <별칭> <원격경로> [로컬경로]     # 원격과 로컬 사본 �
 sshq put <별칭> <원격경로> [로컬경로]      # 원격을 ~/_sshq_backup/에 백업한 뒤 업로드 (폴더면 바뀐 파일만 묶음으로)
 sshq restore <별칭> <원격경로> [백업]      # 백업으로 되돌리기 (생략 시 가장 최근 백업)
 sshq restore <별칭> --batch [묶음]         # 폴더 put 묶음 전체 되돌리기 (생략 시 묶음 목록)
-sshq log <별칭> [줄수]                    # 서버를 바꾼 작업 기록 (put·restore·del·exec)
+sshq log <별칭> [줄수]                    # 서버를 바꾼 작업 기록 (put·restore·del·exec·sudo)
 sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_delete/ 아래로 옮기기
 sshq clean <별칭> [원격경로]              # work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
 sshq backup <별칭> [원격폴더]             # backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령
+sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실행
+sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인 요청, --all은 모든 서버
+sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
-sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec 거부, ""면 해제)
+sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가 (접속정보는 빈칸)
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
@@ -63,11 +66,20 @@ sshq update                              # 새 버전으로 업데이트
 - 삭제(`rm`, `rmdir`), 원본을 덮어쓰는 `mv`, 서비스 재시작, 패키지 설치, `chmod -R`/`chown -R`, crontab 수정, DB 쓰기는 사용자가 명시적으로 요청한 경우에만 한다. 삭제가 필요하면 `rm`·`mv` 대신 `sshq del <별칭> <경로>`로 옮긴다. 원래 경로 그대로 `~/_sshq_to_delete/` 아래로 가고(예: `www/a.php` → `~/_sshq_to_delete/www/a.php`), 폴더 권한은 700으로 맞춰진다. `~/`로 시작하는 경로는 로컬 셸이 바꾸지 않도록 `'~/...'`처럼 따옴표로 감싼다.
 - exec 명령은 Claude Code가 실행 전에 사용자 승인을 받는다. 무엇을 왜 하는지 한 줄로 먼저 말한다.
 
+## sudo를 쓰는 경우
+- 승인된 명령은 `sshq` 목록의 `sudo` 칸과 `모든 서버 sudo` 줄에 나온다. 명령에 `sudo`를 붙이지 않고 `sshq sudo <별칭> "pm2 list"`처럼 쓴다.
+- 목록에 없으면 어떤 명령을 왜 sudo로 써야 하는지 한 줄로 말하고 `sshq sudo-allow <별칭> "<명령>"`을 실행한다. 사용자가 승인 창에서 허락해야 목록에 들어간다. 필요한 만큼만 좁혀서 요청한다(예: `pm2 restart`).
+- `--all`은 사용자가 모든 서버에 쓰겠다고 말한 경우에만 요청한다. 그렇지 않으면 작업 중인 별칭으로 요청한다.
+- 승인 규칙이 없다는 오류가 나오면 사용자에게 그대로 알린다. 승인 없이 쓰려고 `exec`로 우회하거나 sudo 명령을 다른 방법으로 실행하지 않는다.
+- 비밀번호는 sshq가 넣는다. 사용자에게 묻지 않는다.
+- 끝나지 않는 명령은 쓰지 않는다. `pm2 logs`는 `--nostream --lines 200`을 붙인다.
+- `sudo` 칸의 명령도 서비스에 바로 영향을 준다. 재시작·삭제 등은 사용자가 요청한 경우에만 한다.
+
 ## 설정을 직접 고치는 경우
 - 사용자가 "여기는 ○○ 서버 쓰는 거야"라고 하면 `sshq` 첫 줄의 현재 프로젝트 이름으로 `sshq set <별칭> projects +<프로젝트>`를 실행한다. projects 전체를 덮어쓰는 `,` 형식은 쓰지 않는다.
 - 사용자가 서버 용도를 설명하면 `desc`를 채운다. 근거 없이 추측으로 채우지 않는다.
 - 사용자가 새 서버를 추가하라고 하면 `sshq new`로 양식만 만들고, 사용자에게 `sshq.json`에서 해당 별칭의 host·user·password 또는 key를 채워 달라고 한다. 별칭 이름은 기존 별칭처럼 짓되, 애매하면 묻는다.
-- host·port·user·password·key·hostkey는 사용자만 수정한다. 이 값을 대화로 받아도 직접 넣지 말고 사용자가 파일에 넣게 한다.
+- host·port·user·password·key·hostkey·sudo는 사용자만 수정한다(sudo는 `sudo-allow` 승인으로). 이 값을 대화로 받아도 직접 넣지 말고 사용자가 파일에 넣게 한다.
 
 ## 하지 않는 것
 - 접속정보 파일 `sshq.json`을 직접 읽거나 편집하지 않는다. `~/.ssh`의 키 파일도 읽지 않는다.

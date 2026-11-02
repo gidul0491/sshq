@@ -1,4 +1,7 @@
 {
+  "_global": {
+    "sudo": []
+  },
   "server-example-prod": {
     "host": "",
     "port": 22,
@@ -8,6 +11,7 @@
     "root": "www",
     "projects": [],
     "desc": "",
-    "mode": ""
+    "mode": "",
+    "sudo": []
   }
 }

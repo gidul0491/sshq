@@ -40,17 +40,17 @@ node $HOME\git\sshq\install.js
 
 ```
 "allow": [ "Bash(sshq *)", "Edit(~/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)" ],
 "deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)" ]
 ```
 
-`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기와 제한 없는 명령만 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열지 못하게 한다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
+`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기, 제한 없는 명령, sudo 명령 승인만 사용자 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열지 못하게 한다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
 
 Windows에서는 Claude Code가 PowerShell로 실행할 때를 위해 같은 규칙을 `PowerShell(...)`로도 넣는다. 경로는 `C:\git\sshq`라면 `//c/git/sshq/...` 형식으로 쓴다.
 
 ```
 "allow": [ "Bash(sshq *)", "PowerShell(sshq *)", "Edit(//c/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)" ],
 "deny":  [ "Read(//c/git/sshq/sshq.json)", "Edit(//c/git/sshq/sshq.json)" ]
 ```
 
@@ -69,9 +69,12 @@ sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_de
 sshq clean <별칭> [원격경로]              # work/<별칭>/의 로컬 사본 지우기, 생략 시 전부
 sshq backup <별칭> [원격폴더]             # backup/<별칭>/에 tar.gz로 받기, 생략 시 홈 전체
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
+sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실행
+sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인, --all은 모든 서버 (승인)
+sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
-sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec 거부, ""면 해제)
+sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
@@ -86,8 +89,12 @@ sshq update                              # 새 버전으로 업데이트
 - `backup`은 서버 폴더를 tar.gz 하나로 받아 풀지 않고 보관한다(권한·수정 시각 유지). 홈 전체일 때는 `_sshq_backup`, `_sshq_to_delete`를 뺀다. 받은 뒤 파일 수를 서버와 비교하고, 다르면 서버 경고와 함께 알린다. DB는 포함되지 않는다.
 - 폴더 `put`은 로컬 폴더와 원격을 비교해 바뀐 파일과 새 파일만 같은 시각(묶음)으로 백업·업로드하고, 묶음 내용을 `~/_sshq_backup/.batches/<묶음>.json`에 적어 둔다. 서버에만 있는 파일은 지우지 않는다. `restore --batch`는 바꾼 파일을 묶음 직전 백업으로 되돌리고, 새로 만든 파일은 `~/_sshq_to_delete/`로 옮긴다.
 - `restore`는 이름의 시각으로 가장 최근 백업을 고른다(백업은 원본 수정 시각을 유지하므로 파일 시각으로 고르지 않는다).
-- 서버를 바꾼 작업(put·restore·del·exec)은 `log/<별칭>.log`에 남는다(git 제외).
-- `mode`가 `readonly`인 별칭은 put·restore·del·exec를 거부한다. 조회·get·diff·backup은 된다.
+- 서버를 바꾼 작업(put·restore·del·exec·sudo)과 sudo 승인 목록 변경은 `log/<별칭>.log`에 남는다(git 제외).
+- `sudo`는 그 별칭의 `sudo` 목록이나 모든 서버 목록(`sshq.json`의 `_global`)에 있는 명령만 실행한다. 단어 단위로 앞부분이 같아야 한다(`pm2`는 모든 pm2 명령, `pm2 restart`는 restart만). `;` `&&` `>` 등은 거부하고, `|` 뒤에는 조회 명령만 쓸 수 있다.
+- sudo 비밀번호는 별칭의 `password`를 쓰고, 서버가 물을 때만 보낸다. 틀리면 다시 시도하지 않는다. `password`가 비어 있으면 서버의 sudo 설정이 비밀번호를 묻지 않는 경우에만 실행된다.
+- `--all`로 승인한 명령은 앞으로 추가할 서버에도 적용된다. `readonly` 별칭에서는 실행되지 않는다. 변경 기록은 `sshq log --all`로 본다. `_global`과 `--all`은 별칭으로 쓸 수 없다.
+- `sudo-allow`는 `ask` 규칙이 없으면 실행되지 않는다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
+- `mode`가 `readonly`인 별칭은 put·restore·del·exec·sudo를 거부한다. 조회·get·diff·backup은 된다.
 - `del`은 지우지 않고 서버 홈의 `~/_sshq_to_delete/` 아래 원래 경로로 옮긴다. 같은 이름이 있으면 뒤에 `_<시각>`을 붙인다. 옮긴 뒤 원래 자리에서 사라졌는지 확인한다.
 - `~/_sshq_backup`, `~/_sshq_to_delete` 폴더 권한은 sshq가 700(본인만)으로 맞춘다.
 - `~/`로 시작하는 원격경로는 로컬 셸이 바꾸지 않도록 `'~/...'`처럼 따옴표로 감싼다.

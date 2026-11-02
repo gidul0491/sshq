@@ -20,7 +20,16 @@ const DEL_DIR = '_sshq_to_delete';
 // 폴더 put 한 번(묶음)에 무엇을 바꾸고 새로 만들었는지 적어 두는 곳 (restore --batch용)
 const BATCH_DIR = `${BAK_DIR}/.batches`;
 const EDITABLE = ['root', 'projects', 'desc', 'mode'];
-const MODES = ['', 'readonly']; // readonly: put·restore·del·exec 거부
+const MODES = ['', 'readonly']; // readonly: put·restore·del·exec·sudo 거부
+// sudo가 비밀번호를 물을 때만 보내려고 프롬프트를 이 표시로 바꿔 알아본다
+const SUDO_PROMPT = 'sshq_sudo_prompt:';
+// sudo-allow·sudo-remove에서 모든 서버를 뜻하는 인자와, 전체 서버 설정을 담는 sshq.json 키
+const ALL_SERVERS = '--all';
+const GLOBAL_KEY = '_global';
+// 승인 없이 sudo 목록이 늘어나지 않도록 sudo-allow는 Claude Code의 ask 규칙이 있어야 실행한다
+const SUDO_ALLOW_RULES = process.platform === 'win32'
+  ? ['Bash(sshq sudo-allow *)', 'PowerShell(sshq sudo-allow *)']
+  : ['Bash(sshq sudo-allow *)'];
 
 const fail = (msg, code = 1) => { console.error(msg); process.exit(code); };
 if (Number(process.versions.node.split('.')[0]) < 22) fail(`Node 22 이상이 필요합니다. (현재: ${process.version})`);
@@ -39,12 +48,15 @@ const USAGE = `사용법:
   sshq clean <별칭> [원격경로]            work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
   sshq backup <별칭> [원격폴더]           폴더를 backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
+  sshq sudo <별칭> "<명령>"               승인된 명령을 sudo로 실행
+  sshq sudo-allow <별칭|--all> "<명령>"   sudo로 쓸 명령 승인, --all은 모든 서버 (사용자 승인 필요)
+  sshq sudo-remove <별칭|--all> "<명령>"  승인된 sudo 명령 빼기
   sshq set <별칭> <root|projects|desc|mode> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "")
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)
   sshq version                           설치된 버전과 새 버전 확인
   sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'log', 'exec', 'set', 'new', 'version', 'update', 'help'];
+const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -54,14 +66,18 @@ try {
 } catch (e) {
   fail(`sshq.json 오류: ${e.message}`);
 }
+// all에는 서버 별칭만 남긴다. 전체 서버 설정은 저장할 때 다시 합친다
+const globalSettings = { sudo: [], ...all[GLOBAL_KEY] };
+delete all[GLOBAL_KEY];
 // 빠진 항목만 빈칸으로 채운다 (있는 값은 그대로). 다음 저장 때 파일에도 반영된다
 for (const c of Object.values(all)) {
   c.root ??= '';
   c.projects ??= [];
   c.desc ??= '';
   c.mode ??= '';
+  c.sudo ??= [];
 }
-const save = () => fs.writeFileSync(FILE, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
+const save = () => fs.writeFileSync(FILE, JSON.stringify({ [GLOBAL_KEY]: globalSettings, ...all }, null, 2) + '\n', { mode: 0o600 });
 
 // ---------- 조회 명령 검사 ----------
 // 파이프로 이은 각 명령이 읽기 전용 목록에 있어야 하고, 쓰기·연결·치환 기호는 막는다
@@ -115,6 +131,18 @@ function checkRead(cmd) {
   return '';
 }
 
+// 맨 앞 명령은 이 서버나 전체 서버 승인 목록의 단어들로 시작해야 하고(pm2 restart는 pm2 restart app까지 허용), 파이프 뒤는 조회 명령만 된다
+function checkSudo(alias, server, cmd) {
+  const pipeSegments = splitPipes(cmd);
+  if (!pipeSegments) return 'sudo 명령에는 따옴표 밖의 ; & && || > < 와 ` $( 를 쓸 수 없습니다.';
+  const sudoCommand = pipeSegments[0].trim();
+  const commandWords = sudoCommand.split(/\s+/);
+  const approvedCommands = [...server.sudo, ...globalSettings.sudo];
+  const approved = approvedCommands.some((entry) => entry.split(' ').every((word, index) => word === commandWords[index]));
+  if (!approved) return `승인되지 않은 sudo 명령입니다: ${sudoCommand} (승인된 명령: ${approvedCommands.join(', ') || '없음'})\n승인 요청: sshq sudo-allow ${alias} "<명령>"`;
+  return pipeSegments.length > 1 ? checkRead(pipeSegments.slice(1).join('|')) : '';
+}
+
 // ---------- 공통 ----------
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const ts = () => {
@@ -127,7 +155,7 @@ const home = (p) => (p && /^~[/\\]/.test(p) ? path.join(os.homedir(), p.slice(2)
 // 로컬경로 인자: ~/는 홈 기준, 윈도우에서 Git Bash 형식(/c/...)은 C:/...로
 const localArg = (p) => path.resolve(WIN ? home(p).replace(/^\/([a-zA-Z])(?=\/|$)/, '$1:') : home(p));
 
-// write: 서버를 바꾸는 명령(put·restore·del·exec). readonly 별칭이면 거부한다
+// write: 서버를 바꾸는 명령(put·restore·del·exec·sudo). readonly 별칭이면 거부한다
 function conf(alias, write) {
   if (!alias) fail(USAGE);
   const c = all[alias];
@@ -196,15 +224,22 @@ function connect(alias, c) {
   });
 }
 
-function run(conn, cmd) {
+// sudo가 비밀번호를 물으면 sudoPassword를 한 번만 보내고 입력을 닫는다 (틀려도 다시 시도하지 않음)
+function run(conn, cmd, sudoPassword = '') {
   return new Promise((resolve, reject) => {
     conn.exec(cmd, (err, stream) => {
       if (err) return reject(err);
       let out = '';
       let errOut = '';
+      let sudoAnswered = false;
       stream.on('data', (d) => { out += d; });
-      stream.stderr.on('data', (d) => { errOut += d; });
-      stream.on('close', (code) => resolve({ code: code ?? 0, out, err: errOut }));
+      stream.stderr.on('data', (d) => {
+        errOut += d;
+        if (sudoAnswered || !errOut.includes(SUDO_PROMPT)) return;
+        sudoAnswered = true;
+        stream.end(sudoPassword ? `${sudoPassword}\n` : undefined);
+      });
+      stream.on('close', (code) => resolve({ code: code ?? 0, out, err: errOut.replaceAll(SUDO_PROMPT, '') }));
     });
   });
 }
@@ -242,21 +277,22 @@ const shellOk = async (conn) => (await run(conn, 'echo sshq_ok').catch(() => ({ 
 const NO_SHELL = '명령 실행이 막힌 서버입니다 (SFTP만 됨). 목록은 sshq ls, 파일은 get·diff·put·restore·del·backup을 쓰세요.';
 
 // ---------- 명령 ----------
-async function cmdRun(alias, cmd, checked) {
-  const c = conf(alias, !checked);
+// runKind: read(조회 명령만), exec(제한 없음), sudo(승인된 명령만)
+async function cmdRun(alias, cmd, runKind) {
+  const c = conf(alias, runKind !== 'read');
   if (!cmd) fail(USAGE);
-  if (checked) {
-    const why = checkRead(cmd);
-    if (why) fail(why);
-  }
+  const why = runKind === 'read' ? checkRead(cmd) : runKind === 'sudo' ? checkSudo(alias, c, cmd) : '';
+  if (why) fail(why);
   const conn = await connect(alias, c);
   try {
-    const r = await run(conn, withCd(c, cmd));
+    const r = runKind === 'sudo'
+      ? await run(conn, withCd(c, `sudo -S -p ${q(SUDO_PROMPT)} ${cmd}`), c.password)
+      : await run(conn, withCd(c, cmd));
     if (r.code !== 0 && !(await shellOk(conn))) fail(NO_SHELL);
     printOut(r.out);
     if (r.err) process.stderr.write(r.err);
     process.exitCode = r.code;
-    if (!checked) logAct(alias, 'exec', `${cmd} (종료 코드 ${r.code})`);
+    if (runKind !== 'read') logAct(alias, runKind, `${cmd} (종료 코드 ${r.code})`);
   } finally {
     conn.end();
   }
@@ -706,11 +742,46 @@ function cmdClean(alias, p) {
   console.log(`지움: ${lp} (파일 ${n}개)`);
 }
 
+// sudo 승인 목록을 고친다. 빼기는 권한을 줄이기만 하므로 승인 규칙을 보지 않는다
+function cmdSudoList(listAction, sudoTarget, sudoCommand) {
+  if (!sudoTarget || !sudoCommand) fail(`사용법: sshq ${listAction} <별칭|${ALL_SERVERS}> "<명령>"`);
+  const forAllServers = sudoTarget === ALL_SERVERS;
+  const sudoOwner = forAllServers ? globalSettings : all[sudoTarget];
+  if (!sudoOwner) fail(`별칭 없음: ${sudoTarget} (있는 별칭: ${Object.keys(all).join(', ')})`);
+  const entry = sudoCommand.trim().split(/\s+/).join(' ');
+  if (listAction === 'sudo-allow') {
+    const missingRules = missingSudoAllowRules();
+    if (missingRules.length) fail(`먼저 ~/.claude/settings.json의 permissions.ask에 추가하세요: ${missingRules.join(', ')}`);
+    const pipeSegments = splitPipes(entry);
+    if (!pipeSegments || pipeSegments.length > 1 || /["'\\]/.test(entry)) fail('sudo 승인은 명령과 인자만 쓸 수 있습니다. 예: pm2 restart');
+    if (entry.split(' ')[0] === 'sudo') fail('sudo를 뺀 명령만 쓰세요. 예: pm2');
+    sudoOwner.sudo = [...new Set([...sudoOwner.sudo, entry])];
+  } else {
+    if (!sudoOwner.sudo.includes(entry)) fail(`승인 목록에 없습니다: ${entry} (승인된 명령: ${sudoOwner.sudo.join(', ') || '없음'})`);
+    sudoOwner.sudo = sudoOwner.sudo.filter((approved) => approved !== entry);
+  }
+  save();
+  logAct(sudoTarget, listAction, entry);
+  const alsoGlobal = !forAllServers && globalSettings.sudo.length ? ` (모든 서버: ${globalSettings.sudo.join(', ')})` : '';
+  console.log(`${forAllServers ? '모든 서버' : sudoTarget} sudo 승인 목록: ${sudoOwner.sudo.join(', ') || '없음'}${alsoGlobal}`);
+}
+
+function missingSudoAllowRules() {
+  let askRules = [];
+  try {
+    askRules = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).permissions?.ask || [];
+  } catch (e) {
+    return SUDO_ALLOW_RULES;
+  }
+  return SUDO_ALLOW_RULES.filter((rule) => !askRules.includes(rule));
+}
+
 function cmdSetNew(cmd, name, a, b) {
   if (cmd === 'new') {
     if (!name) fail('사용법: sshq new <별칭> [root] [설명]');
     if (all[name]) fail(`이미 있는 별칭: ${name}`);
-    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '', projects: [], desc: b || '', mode: '' };
+    if (name === GLOBAL_KEY || name === ALL_SERVERS) fail(`별칭으로 쓸 수 없는 이름: ${name}`);
+    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '', projects: [], desc: b || '', mode: '', sudo: [] };
   } else {
     if (!name || !a || b === undefined) fail(`사용법: sshq set <별칭> <${EDITABLE.join('|')}> <값>`);
     if (!all[name]) fail(`별칭 없음: ${name} (있는 별칭: ${Object.keys(all).join(', ')})`);
@@ -788,11 +859,12 @@ function cmdList() {
   const url = git('remote get-url origin');
   const repo = url ? url.replace(/\.git$/, '').split(/[/:]/).pop() : path.basename(git('rev-parse --show-toplevel') || process.cwd());
   console.log(`현재 프로젝트: ${repo}`);
-  console.log(['', '별칭', 'host', 'user', '인증', 'root', '모드', '프로젝트', '설명'].join('\t'));
+  if (globalSettings.sudo.length) console.log(`모든 서버 sudo: ${globalSettings.sudo.join(', ')}`);
+  console.log(['', '별칭', 'host', 'user', '인증', 'root', '모드', 'sudo', '프로젝트', '설명'].join('\t'));
   for (const [k, c] of Object.entries(all)) {
     const mark = repo && (c.projects || []).includes(repo) ? '*' : '';
     const auth = c.key ? '키' : c.password ? '비밀번호' : c.host ? 'agent' : '';
-    console.log([mark, k, c.host, c.user, auth, c.root, c.mode, (c.projects || []).join(','), c.desc].map((v) => (v == null ? '' : v)).join('\t'));
+    console.log([mark, k, c.host, c.user, auth, c.root, c.mode, c.sudo.join(','), (c.projects || []).join(','), c.desc].map((v) => (v == null ? '' : v)).join('\t'));
   }
 }
 
@@ -811,12 +883,15 @@ async function main() {
     case 'backup': return cmdBackup(a1, a2);
     case 'version': return cmdVersion();
     case 'update': return cmdUpdate();
-    case 'exec': return cmdRun(a1, a2, false);
+    case 'exec': return cmdRun(a1, a2, 'exec');
+    case 'sudo': return cmdRun(a1, a2, 'sudo');
+    case 'sudo-allow':
+    case 'sudo-remove': return cmdSudoList(a0, a1, a2);
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
     default:
       if (CMDS.includes(a0)) fail(USAGE);
-      return cmdRun(a0, a1, true);
+      return cmdRun(a0, a1, 'read');
   }
 }
 
