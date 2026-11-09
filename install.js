@@ -76,9 +76,22 @@ if (WIN) {
 const sep = WIN ? ';' : ':';
 const norm = (p) => { const r = path.resolve(p).replace(/[\\/]+$/, ''); return WIN ? r.toLowerCase() : r; };
 if (!(process.env.PATH || '').split(sep).some((p) => p && norm(p) === norm(BIN))) {
-  console.log(WIN
-    ? `${BIN}을 PATH에 추가하세요 (PowerShell, 새 터미널부터 적용):\n  [Environment]::SetEnvironmentVariable('Path', "$env:USERPROFILE\\.local\\bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')`
-    : `~/.local/bin을 PATH에 추가하세요: echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`);
+  if (WIN) {
+    console.log(`${BIN}을 PATH에 추가하세요 (PowerShell, 새 터미널부터 적용):\n  [Environment]::SetEnvironmentVariable('Path', "$env:USERPROFILE\\.local\\bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')`);
+  } else {
+    addLocalBinToShellRc();
+  }
+}
+
+// 새로 여는 터미널과 Claude Code가 읽는 셸 설정 파일에 한 번만 넣는다
+function addLocalBinToShellRc() {
+  const shellName = path.basename(process.env.SHELL || '');
+  const shellRc = path.join(HOME, shellName === 'zsh' ? '.zshrc' : shellName === 'bash' ? '.bashrc' : '.profile');
+  const pathLine = 'export PATH="$HOME/.local/bin:$PATH"';
+  const shellRcText = fs.existsSync(shellRc) ? fs.readFileSync(shellRc, 'utf8') : '';
+  if (shellRcText.includes(pathLine)) return;
+  fs.appendFileSync(shellRc, `\n${pathLine}\n`);
+  console.log(`${shellRc}에 ~/.local/bin을 PATH로 추가했습니다. 새 터미널부터 적용됩니다.`);
 }
 
 console.log(`설치 완료. ${conf}에 접속정보를 입력하세요.`);

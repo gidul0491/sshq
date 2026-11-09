@@ -15,6 +15,8 @@ git clone https://github.com/gidul0491/sshq.git ~/git/sshq
 ~/git/sshq/install.sh
 ```
 
+`~/.local/bin`이 PATH에 없으면 셸 설정 파일(zsh는 `~/.zshrc`, bash는 `~/.bashrc`)에 추가한다. 새 터미널부터 `sshq`로 실행된다.
+
 ### Windows
 
 PowerShell 또는 Git Bash에서 실행한다. bash가 없어도 된다.
