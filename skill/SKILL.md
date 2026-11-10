@@ -45,7 +45,8 @@ sshq update                              # 새 버전으로 업데이트
 - 처음 보는 서버는 `sshq <별칭> "pwd"`, `sshq <별칭> "ls -la"`로 구조부터 본다.
 - 큰 파일은 `cat` 대신 `head`, `tail -n 200`, `grep -n`으로 필요한 부분만 본다. 출력은 2000줄에서 잘린다.
 - 코드를 몇 개 볼 때는 서버에서 `cat`·`grep`으로 본다. 폴더 `get`은 많은 파일을 로컬 도구로 한꺼번에 검사할 때만 쓰고, 받기 전에 `du -sh <폴더>`로 크기를 보고 크면 하위 폴더 단위로 받는다.
-- 허용: 조회 명령(`ls cat head tail grep find stat wc du df ps php -v/-l/-m/-i tar -t git status/log/diff` 등)을 `|`로 이은 것. 따옴표 밖의 `;` `&&` `||` `>` `<`와 `` ` `` `$(`는 거부되니 명령을 나눠서 여러 번 실행한다.
+- 허용: 조회 명령(`ls cat head tail grep find stat wc du df ps php -v/-l/-m/-i tar -t git status/log/diff pm2 list/status/logs --nostream node -v systemctl status journalctl ss netstat jq` 등)을 `|`로 이은 것. `.env` 파일이 들어간 명령은 거부된다.
+- pm2를 root로 띄운 서버는 `pm2 list`가 권한 오류를 낸다. 그때는 `sshq sudo <별칭> "pm2 list"`를 쓴다. 따옴표 밖의 `;` `&&` `||` `>` `<`와 `` ` `` `$(`는 거부되니 명령을 나눠서 여러 번 실행한다.
 - 거부되면 `exec`로 우회하지 말고, 조회로 나눌 수 있는지 먼저 본다.
 
 ## 수정 절차

@@ -86,7 +86,13 @@ const READ = new Set([
   'df', 'du', 'ps', 'uptime', 'free', 'stat', 'wc', 'file', 'which', 'date', 'md5sum', 'sha1sum', 'sha256sum',
   'diff', 'sort', 'uniq', 'cut', 'tr', 'echo', 'readlink', 'realpath', 'basename', 'dirname', 'zcat', 'tree',
   'php', 'tar', 'crontab', 'git', 'nl', 'column', 'test',
+  'pm2', 'node', 'npm', 'java', 'systemctl', 'journalctl', 'ss', 'netstat', 'jq',
 ]);
+// nvm 등으로 설치돼 로그인 셸에서만 경로가 잡히는 명령. 이 명령이 들어간 조회는 bash -lc 로 실행한다
+const LOGIN_SHELL_COMMANDS = new Set(['pm2', 'node', 'npm', 'java']);
+// pm2 jlist·describe·env 는 프로세스 환경변수(키·접속정보)를 출력해서 뺀다. logs 는 --nostream 이 있어야 끝난다
+const PM2_READ = /^(list|ls|l|status)$/;
+const usesLoginShell = (cmd) => (splitPipes(cmd) || []).some((seg) => LOGIN_SHELL_COMMANDS.has(seg.trim().split(/\s+/)[0]));
 // 따옴표 밖의 | 로 나눈다. 따옴표 밖의 ; & > < 줄바꿈, 작은따옴표 밖의 ` $( 는 거부한다
 function splitPipes(s) {
   const segs = [];
@@ -127,6 +133,13 @@ function checkRead(cmd) {
     if (c === 'git' && !/^(status|log|diff|show|branch|remote|rev-parse|blame|ls-files)$/.test(a1)) return 'git은 조회 하위 명령만 쓸 수 있습니다.';
     if (c === 'find' && /\s-(exec|execdir|delete|ok|okdir|fprint0?|fprintf|fls)\b/.test(' ' + rest)) return 'find에서 -exec, -delete 등은 쓸 수 없습니다.';
     if (c === 'sort' && /(^|\s)(-o|--output)/.test(rest)) return 'sort -o는 쓸 수 없습니다.';
+    if (c === 'pm2' && !(PM2_READ.test(a1) || (a1 === 'logs' && /(^|\s)--nostream(\s|$)/.test(rest)))) return 'pm2는 list, ls, status, logs --nostream만 쓸 수 있습니다.';
+    if ((c === 'node' || c === 'npm') && !/^(-v|--version)$/.test(rest)) return `${c}는 -v만 쓸 수 있습니다.`;
+    if (c === 'java' && !/^(-version|--version)$/.test(rest)) return 'java는 -version만 쓸 수 있습니다.';
+    if (c === 'systemctl' && !/^(status|is-active|is-enabled|is-failed|list-units|list-timers|list-unit-files)$/.test(a1)) return 'systemctl은 status, is-active, list-units, list-timers 등 조회만 쓸 수 있습니다.';
+    if (c === 'journalctl' && /(^|\s)(-f|--follow|--vacuum\S*|--rotate|--flush|--sync|--relinquish-var|--setup-keys)(\s|$)/.test(rest)) return 'journalctl은 -f, --vacuum 등 없이 조회만 쓸 수 있습니다.';
+    if (c === 'ss' && /(^|\s)(-K|--kill)(\s|$)|(^|\s)-[a-zA-Z]*K/.test(rest)) return 'ss -K는 쓸 수 없습니다.';
+    if (/\.env(?!\.example)\b/.test(rest)) return '.env 파일은 볼 수 없습니다 (.env.example만 됩니다).';
   }
   return '';
 }
@@ -287,7 +300,7 @@ async function cmdRun(alias, cmd, runKind) {
   try {
     const r = runKind === 'sudo'
       ? await run(conn, withCd(c, `sudo -S -p ${q(SUDO_PROMPT)} ${cmd}`), c.password)
-      : await run(conn, withCd(c, cmd));
+      : await run(conn, withCd(c, usesLoginShell(cmd) ? `bash -lc ${q(cmd)}` : cmd));
     if (r.code !== 0 && !(await shellOk(conn))) fail(NO_SHELL);
     printOut(r.out);
     if (r.err) process.stderr.write(r.err);
