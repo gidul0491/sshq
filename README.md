@@ -29,7 +29,7 @@ node $HOME\git\sshq\install.js
 - `~/.local/bin`에 Git Bash용 `sshq`와 PowerShell·cmd용 `sshq.cmd`를 만든다. PATH에 없으면 사용자 PATH에 넣는 PowerShell 명령을 알려 준다(Git Bash와 Claude Code에서도 함께 보인다).
 - 스킬은 junction으로 링크한다(관리자 권한 불필요).
 - nvm-windows는 `C:\nvm4w\nodejs` 링크가 아니라 실제 버전 폴더의 node로 고정한다.
-- `sshq.json`과 `work/`·`backup/`·`log/`는 상속 권한을 끊고 본인만 접근하게 한다. `C:\` 바로 아래 폴더는 기본으로 다른 사용자도 읽을 수 있다.
+- `sshq.json`과 `work/`·`backup/`·`log/`·`mirror/`는 상속 권한을 끊고 본인만 접근하게 한다. `C:\` 바로 아래 폴더는 기본으로 다른 사용자도 읽을 수 있다.
 - Git Bash에서 `/`로 시작하는 원격경로가 `C:/Program Files/Git/...`로 바뀌지 않게 실행기가 막는다.
 - 로컬 사본의 줄바꿈이 CRLF로 바뀌면 `diff`가 알려 준다. LF로 되돌린 뒤 올린다.
 - 키 없이 ssh-agent를 쓰면 Windows OpenSSH의 agent(`ssh-agent` 서비스)를 쓴다.
@@ -70,6 +70,7 @@ sshq log <별칭> [줄수]                    # 서버를 바꾼 작업 기록 (
 sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_delete/ 아래로 옮기기 (승인)
 sshq clean <별칭> [원격경로]              # work/<별칭>/의 로컬 사본 지우기, 생략 시 전부
 sshq backup <별칭> [원격폴더]             # backup/<별칭>/에 tar.gz로 받기, 생략 시 홈 전체
+sshq mirror <별칭|--all>                 # root 폴더의 코드만 mirror/<별칭>/에 받기 (숨김·라이브러리·데이터 파일 제외)
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실행
 sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인, --all은 모든 서버 (승인)
@@ -77,6 +78,7 @@ sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
 sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
+sshq set <별칭> mirror off                # mirror --all에서 빼기 (""면 다시 포함)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
@@ -89,6 +91,10 @@ sshq update                              # 새 버전으로 업데이트
 - `restore`는 되돌리기 직전 상태도 `~/_sshq_backup/` 아래에 `.bak_<시각>_before_restore`로 남긴다.
 - 폴더 `get`은 서버에서 tar로 묶어 한 번에 받고, tar를 못 쓰면 파일마다 받는다. 로컬에 이미 있던 파일은 덮어쓰고, 서버에 없는 로컬 파일은 지우지 않는다.
 - `backup`은 서버 폴더를 tar.gz 하나로 받아 풀지 않고 보관한다(권한·수정 시각 유지). 홈 전체일 때는 `_sshq_backup`, `_sshq_to_delete`를 뺀다. 받은 뒤 파일 수를 서버와 비교하고, 다르면 서버 경고와 함께 알린다. DB는 포함되지 않는다.
+- `mirror`는 별칭의 root(없으면 홈)에서 코드만 골라 `mirror/<별칭>/`에 받는다. 매번 임시 폴더에 새로 받은 뒤 기존 사본과 바꾸므로 서버에서 지운 파일은 사본에서도 사라진다. 받은 시각과 파일 수는 `mirror/<별칭>/_mirror.json`에 남는다.
+  - 받지 않는 것: 숨김 파일·폴더(`.env.example`, `.htaccess`, `.gitignore`만 받음), `node_modules`, `vendor`, `_sshq_backup`, `_sshq_to_delete`, 키·인증서, 데이터·문서·압축·이미지·폰트 파일, 2MB가 넘는 파일, 이름이 UTF-8이 아닌 파일(맥에서 만들 수 없음).
+  - Next.js 빌드(`.next`)는 `.map`과 서버 JS만 받는다. `.map`에 원본 소스가 있으면 `<프로젝트>/_map_sources/`에 꺼내고 `.next`는 지운다.
+  - `--all`은 접속정보가 있고 `mirror`가 `off`가 아닌 별칭을 모두 받는다. 개인 서버나 데이터만 있는 계정은 `sshq set <별칭> mirror off`로 뺀다.
 - 폴더 `put`은 로컬 폴더와 원격을 비교해 바뀐 파일과 새 파일만 같은 시각(묶음)으로 백업·업로드하고, 묶음 내용을 `~/_sshq_backup/.batches/<묶음>.json`에 적어 둔다. 서버에만 있는 파일은 지우지 않는다. `restore --batch`는 바꾼 파일을 묶음 직전 백업으로 되돌리고, 새로 만든 파일은 `~/_sshq_to_delete/`로 옮긴다.
 - `restore`는 이름의 시각으로 가장 최근 백업을 고른다(백업은 원본 수정 시각을 유지하므로 파일 시각으로 고르지 않는다).
 - 서버를 바꾼 작업(put·restore·del·exec·sudo)과 sudo 승인 목록 변경은 `log/<별칭>.log`에 남는다(git 제외).

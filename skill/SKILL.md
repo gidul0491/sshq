@@ -19,6 +19,7 @@ sshq log <별칭> [줄수]                    # 서버를 바꾼 작업 기록 (
 sshq del <별칭> <원격경로>                # 지우지 않고 ~/_sshq_to_delete/ 아래로 옮기기
 sshq clean <별칭> [원격경로]              # work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
 sshq backup <별칭> [원격폴더]             # backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
+sshq mirror <별칭|--all>                 # root 폴더의 코드만 mirror/<별칭>/에 받기 (숨김·라이브러리·데이터 파일 제외)
 sshq exec <별칭> "<명령>"                 # 제한 없는 명령
 sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실행
 sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인 요청, --all은 모든 서버
@@ -26,6 +27,7 @@ sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
 sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
+sshq set <별칭> mirror off                # mirror --all에서 빼기 (""면 다시 포함)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가 (접속정보는 빈칸)
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
@@ -48,6 +50,13 @@ sshq update                              # 새 버전으로 업데이트
 - 허용: 조회 명령(`ls cat head tail grep find stat wc du df ps php -v/-l/-m/-i tar -t git status/log/diff pm2 list/status/logs --nostream node -v systemctl status journalctl ss netstat jq` 등)을 `|`로 이은 것. `.env` 파일이 들어간 명령은 거부된다.
 - pm2를 root로 띄운 서버는 `pm2 list`가 권한 오류를 낸다. 그때는 `sshq sudo <별칭> "pm2 list"`를 쓴다. 따옴표 밖의 `;` `&&` `||` `>` `<`와 `` ` `` `$(`는 거부되니 명령을 나눠서 여러 번 실행한다.
 - 거부되면 `exec`로 우회하지 말고, 조회로 나눌 수 있는지 먼저 본다.
+
+## 코드 사본 (mirror)
+- `mirror/<별칭>/`이 있으면 서버에 `grep`을 여러 번 보내기 전에 그 사본을 로컬 검색 도구로 먼저 찾는다. 받은 시각은 `mirror/<별칭>/_mirror.json`의 `mirroredAt`에 있고, 답에는 그 시각 기준이라고 밝힌다.
+- 사용자가 최신 코드를 보라고 하면 `sshq mirror <별칭>`으로 다시 받은 뒤 본다.
+- 사본에 없는 것: 숨김 파일·폴더(`.env.example`, `.htaccess`, `.gitignore`만 받음), `node_modules`·`vendor`, 키·인증서, 데이터·문서·압축·이미지 파일, 2MB가 넘는 파일, 이름이 UTF-8이 아닌 파일. 이런 파일이 필요하면 서버에서 직접 본다.
+- Next.js 빌드(`.next`)는 `.map`에 든 원본 소스를 `<프로젝트>/_map_sources/`에 꺼내 두고 `.next`는 지운다. `.map`이 없는 빌드는 `.next`의 서버 JS를 그대로 둔다.
+- 사본의 설정 파일에 적힌 비밀번호·키는 대화나 답에 옮기지 않는다.
 
 ## 수정 절차
 1. `sshq get <별칭> <파일>` → 출력된 로컬 경로(`work/<별칭>/...`)의 사본을 Edit 도구로 고친다. 서버에서 `sed -i` 등으로 직접 고치지 않는다.
@@ -96,4 +105,5 @@ sshq 저장소 폴더(보통 `~/git/sshq`) 하나에 전부 있다. `~/.local/bi
 - `sshq.json`: 접속정보 (git 제외, 각자 입력)
 - `work/`: `get`으로 내려받은 사본 (git 제외)
 - `backup/`: `backup`으로 받은 tar.gz (git 제외)
+- `mirror/`: `mirror`로 받은 코드 사본 (git 제외)
 - `skill/SKILL.md`: 이 스킬

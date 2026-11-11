@@ -19,8 +19,9 @@ const BAK_DIR = '_sshq_backup';
 const DEL_DIR = '_sshq_to_delete';
 // 폴더 put 한 번(묶음)에 무엇을 바꾸고 새로 만들었는지 적어 두는 곳 (restore --batch용)
 const BATCH_DIR = `${BAK_DIR}/.batches`;
-const EDITABLE = ['root', 'projects', 'desc', 'mode'];
+const EDITABLE = ['root', 'projects', 'desc', 'mode', 'mirror'];
 const MODES = ['', 'readonly']; // readonly: put·restore·del·exec·sudo 거부
+const MIRROR_MODES = ['', 'off']; // off: mirror --all에서 빼고 mirror <별칭>도 거부
 // sudo가 비밀번호를 물을 때만 보내려고 프롬프트를 이 표시로 바꿔 알아본다
 const SUDO_PROMPT = 'sshq_sudo_prompt:';
 // sudo-allow·sudo-remove에서 모든 서버를 뜻하는 인자와, 전체 서버 설정을 담는 sshq.json 키
@@ -47,16 +48,17 @@ const USAGE = `사용법:
   sshq del <별칭> <원격경로>              지우지 않고 ~/${DEL_DIR}/ 아래로 옮기기
   sshq clean <별칭> [원격경로]            work/<별칭>/의 로컬 사본 지우기 (생략 시 전부)
   sshq backup <별칭> [원격폴더]           폴더를 backup/<별칭>/에 tar.gz로 받기 (생략 시 홈 전체)
+  sshq mirror <별칭|--all>               root 폴더의 코드만 mirror/<별칭>/에 받기 (숨김·라이브러리·데이터 파일 제외)
   sshq exec <별칭> "<명령>"               제한 없는 명령 실행 (사용자 승인 필요)
   sshq sudo <별칭> "<명령>"               승인된 명령을 sudo로 실행
   sshq sudo-allow <별칭|--all> "<명령>"   sudo로 쓸 명령 승인, --all은 모든 서버 (사용자 승인 필요)
   sshq sudo-remove <별칭|--all> "<명령>"  승인된 sudo 명령 빼기
-  sshq set <별칭> <root|projects|desc|mode> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "")
+  sshq set <별칭> <root|projects|desc|mode|mirror> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "", mirror는 off 또는 "")
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)
   sshq version                           설치된 버전과 새 버전 확인
   sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'version', 'update', 'help'];
+const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -75,6 +77,7 @@ for (const c of Object.values(all)) {
   c.projects ??= [];
   c.desc ??= '';
   c.mode ??= '';
+  c.mirror ??= '';
   c.sudo ??= [];
 }
 const save = () => fs.writeFileSync(FILE, JSON.stringify({ [GLOBAL_KEY]: globalSettings, ...all }, null, 2) + '\n', { mode: 0o600 });
@@ -238,21 +241,22 @@ function connect(alias, c) {
 }
 
 // sudo가 비밀번호를 물으면 sudoPassword를 한 번만 보내고 입력을 닫는다 (틀려도 다시 시도하지 않음)
-function run(conn, cmd, sudoPassword = '') {
+// outputEncoding 'latin1'은 UTF-8이 아닌 파일 이름(EUC-KR 등)도 바이트 그대로 돌려받을 때 쓴다
+function run(conn, cmd, sudoPassword = '', outputEncoding = 'utf8') {
   return new Promise((resolve, reject) => {
     conn.exec(cmd, (err, stream) => {
       if (err) return reject(err);
-      let out = '';
+      const outChunks = [];
       let errOut = '';
       let sudoAnswered = false;
-      stream.on('data', (d) => { out += d; });
+      stream.on('data', (d) => { outChunks.push(d); });
       stream.stderr.on('data', (d) => {
         errOut += d;
         if (sudoAnswered || !errOut.includes(SUDO_PROMPT)) return;
         sudoAnswered = true;
         stream.end(sudoPassword ? `${sudoPassword}\n` : undefined);
       });
-      stream.on('close', (code) => resolve({ code: code ?? 0, out, err: errOut.replaceAll(SUDO_PROMPT, '') }));
+      stream.on('close', (code) => resolve({ code: code ?? 0, out: Buffer.concat(outChunks).toString(outputEncoding), err: errOut.replaceAll(SUDO_PROMPT, '') }));
     });
   });
 }
@@ -312,36 +316,44 @@ async function cmdRun(alias, cmd, runKind) {
 }
 
 // 폴더: 서버에서 tar로 묶어 한 번에 받고, tar를 못 쓰는 서버(SFTP 전용)는 파일마다 받는다
-function getDirTar(conn, rp, lp) {
+// fileList를 주면 폴더 전체 대신 그 파일들(rp 기준 상대경로, 파일 이름 바이트를 latin1로 담은 문자열)만 받는다
+function getDirTar(conn, rp, lp, fileList) {
+  const tarCommand = fileList ? `cd ${q(rp)} && tar czf - --null -T -` : `tar czf - -C ${q(rp)} .`;
   return new Promise((resolve) => {
-    conn.exec(`tar czf - -C ${q(rp)} .`, (err, stream) => {
+    conn.exec(tarCommand, (err, stream) => {
       if (err) return resolve(false);
+      if (fileList) stream.end(Buffer.from(fileList.map((file) => `${file}\0`).join(''), 'latin1'));
       // -C 대신 cwd: Git Bash의 GNU tar는 -C C:\...의 C:를 원격 호스트로 읽는다
-      const x = spawn('tar', ['xzf', '-'], { cwd: lp, stdio: ['pipe', 'ignore', 'ignore'] });
+      const x = spawn('tar', ['xzf', '-'], { cwd: lp, stdio: ['pipe', 'ignore', 'pipe'] });
       x.on('error', () => { stream.close(); resolve(false); });
       x.stdin.on('error', () => {});
       let warn = '';
+      let localWarn = '';
       stream.stderr.on('data', (d) => { warn += d; });
+      x.stderr.on('data', (d) => { localWarn += d; });
       stream.pipe(x.stdin);
       const remote = new Promise((r) => stream.on('close', r));
       const local = new Promise((r) => x.on('close', r));
       Promise.all([remote, local]).then(([, code]) => {
         if (code === 0 && warn) process.stderr.write(warn);
+        if (code !== 0 && localWarn) process.stderr.write(localWarn.split('\n').slice(0, 20).join('\n') + '\n');
         resolve(code === 0);
       });
     });
   });
 }
-// 파일마다 SFTP로 받는다 (권한·수정 시각 유지). skip: 받지 않을 맨 위 이름. 받은 파일 수와 못 받은 파일 수를 돌려준다
-async function getDirSftp(sftp, rp, lp, skip = []) {
+// 파일마다 SFTP로 받는다 (권한·수정 시각 유지). 받은 파일 수와 못 받은 파일 수를 돌려준다
+// keep(상대경로, attrs)가 false인 파일·폴더는 받지 않는다
+async function getDirSftp(sftp, rp, lp, keep = () => true, relDir = '') {
   const n = { ok: 0, fail: 0 };
   for (const e of await pcall((cb) => sftp.readdir(rp, cb))) {
-    if (skip.includes(e.filename)) continue;
+    const relPath = relDir ? `${relDir}/${e.filename}` : e.filename;
+    if (!keep(relPath, e.attrs)) continue;
     const r = `${rp}/${e.filename}`;
     const l = path.join(lp, e.filename);
     if (e.attrs.isDirectory()) {
       fs.mkdirSync(l, { recursive: true });
-      const s = await getDirSftp(sftp, r, l);
+      const s = await getDirSftp(sftp, r, l, keep, relPath);
       n.ok += s.ok;
       n.fail += s.fail;
     } else if (e.attrs.isFile()) {
@@ -696,7 +708,7 @@ async function cmdBackup(alias, p) {
       const tmp = path.join(path.dirname(out), `.tmp_${ts()}`);
       fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
       try {
-        const n = await getDirSftp(sftp, rp, tmp, ex);
+        const n = await getDirSftp(sftp, rp, tmp, (relPath) => !ex.includes(relPath));
         const t = spawnSync('tar', ['czf', out, '-C', tmp, '.'], { encoding: 'utf8' });
         if (t.status !== 0) throw new Error(`백업 파일을 만들 수 없습니다: ${t.stderr}`);
         fs.chmodSync(out, 0o600);
@@ -739,6 +751,230 @@ async function cmdBackup(alias, p) {
   } finally {
     conn.end();
   }
+}
+
+// ---------- 코드 사본 (mirror) ----------
+// AI가 서버 코드를 로컬 검색 도구로 읽도록 root 폴더(없으면 홈)의 코드만 mirror/<별칭>/에 받아 둔다
+// 받을 때마다 새로 받아 통째로 바꾸므로 서버에서 지운 파일은 사본에서도 사라진다
+// 접속정보·키·명령 기록은 대부분 숨김 파일·폴더에 있어서 숨김은 아래 몇 개만 받는다
+const MIRROR = path.join(DIR, 'mirror');
+const MIRROR_INFO_FILE = '_mirror.json';
+const MIRROR_SKIP_DIRS = new Set(['node_modules', 'vendor', BAK_DIR, DEL_DIR]);
+const MIRROR_HIDDEN_FILES_KEPT = new Set(['.env.example', '.htaccess', '.gitignore']);
+const MIRROR_MAX_FILE_BYTES = 2 * 1024 * 1024;
+// 키·인증서, 고객 자료일 수 있는 데이터·문서 파일, 바이너리
+const MIRROR_SKIP_EXTENSIONS = new Set([
+  '.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.ppk', '.crt', '.cer', '.der',
+  '.csv', '.tsv', '.txt', '.dat', '.sam', '.log', '.out', '.xls', '.xlsx', '.doc', '.docx', '.ppt', '.pptx', '.hwp', '.pdf',
+  '.zip', '.tar', '.gz', '.tgz', '.7z', '.rar', '.jar', '.war', '.class', '.so', '.dll', '.exe', '.bin',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.svg', '.mp3', '.mp4', '.mov', '.avi', '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.sqlite', '.db', '.dump', '.bak',
+]);
+// Next.js 빌드 폴더: .map(원본 소스가 들어 있음)과 서버 JS만 받는다. .map의 원본은 프로젝트의 _map_sources/로 꺼낸다
+const NEXT_BUILD_DIR = '.next';
+const NEXT_SKIP_DIRS = new Set(['cache', 'static']);
+const MAP_SOURCES_DIR = '_map_sources';
+// 번들러가 원본을 못 읽었을 때 sourcesContent에 넣는 문구
+const UNREADABLE_SOURCE_MARK = 'unable to read source';
+
+async function cmdMirror(mirrorTarget) {
+  for (const alias of mirrorAliases(mirrorTarget)) {
+    try {
+      await mirrorServer(alias);
+    } catch (e) {
+      console.error(`${alias}: 받지 못함 (${e.message})`);
+      process.exitCode = 1;
+    }
+  }
+}
+
+// --all이면 접속정보가 있고 mirror가 off가 아닌 모든 별칭
+function mirrorAliases(mirrorTarget) {
+  if (!mirrorTarget) fail(`사용법: sshq mirror <별칭|${ALL_SERVERS}>`);
+  if (mirrorTarget !== ALL_SERVERS) {
+    if (conf(mirrorTarget).mirror === 'off') fail(`코드 사본을 받지 않는 서버입니다: ${mirrorTarget} (받으려면 sshq set ${mirrorTarget} mirror "")`);
+    return [mirrorTarget];
+  }
+  return Object.keys(all).filter((alias) => all[alias].host && all[alias].user && all[alias].mirror !== 'off');
+}
+
+// 임시 폴더에 받아 .map 원본을 꺼낸 뒤 기존 사본과 바꾼다
+async function mirrorServer(alias) {
+  const c = conf(alias);
+  const remoteRoot = c.root || '.';
+  const newMirrorDir = path.join(MIRROR, `.tmp_${alias}_${ts()}`);
+  fs.mkdirSync(newMirrorDir, { recursive: true, mode: 0o700 });
+  try {
+    const downloadSummary = await downloadMirrorFiles(alias, c, remoteRoot, newMirrorDir);
+    const mapSourceCount = extractNextMapSources(newMirrorDir);
+    const mirrorInfo = { alias, remoteRoot: remoteRoot === '.' ? '~' : remoteRoot, mirroredAt: new Date().toLocaleString('sv-SE'), ...downloadSummary, mapSourceCount };
+    fs.writeFileSync(path.join(newMirrorDir, MIRROR_INFO_FILE), JSON.stringify(mirrorInfo, null, 2) + '\n');
+    replaceMirrorDir(alias, newMirrorDir);
+    console.log(`${alias}: ${mirrorInfo.remoteRoot} → ${path.join(MIRROR, alias)}/ (파일 ${downloadSummary.fileCount}개, 빌드에서 꺼낸 원본 ${mapSourceCount}개, 큰 파일 건너뜀 ${downloadSummary.skippedLargeCount}개${downloadSummary.skippedNameCount ? `, 이름이 UTF-8이 아닌 파일 건너뜀 ${downloadSummary.skippedNameCount}개` : ''})`);
+  } finally {
+    fs.rmSync(newMirrorDir, { recursive: true, force: true });
+  }
+}
+
+// 셸이 되면 서버에서 받을 파일 목록을 만들어 tar로 한 번에, SFTP 전용이면 파일마다 받는다
+async function downloadMirrorFiles(alias, c, remoteRoot, newMirrorDir) {
+  const conn = await connect(alias, c);
+  try {
+    const sftp = await sftpOf(conn);
+    const rootStat = await exists(sftp, remoteRoot);
+    if (!rootStat || !rootStat.isDirectory()) throw new Error(`원격 폴더 없음: ${remoteRoot}`);
+    if (await shellOk(conn)) {
+      const { mirrorFiles, skippedLargeCount, skippedNameCount } = await listMirrorFiles(conn, remoteRoot);
+      if (mirrorFiles.length && !(await getDirTar(conn, remoteRoot, newMirrorDir, mirrorFiles))) throw new Error('파일을 받을 수 없습니다 (tar 실패)');
+      return { fileCount: mirrorFiles.length, skippedLargeCount, skippedNameCount };
+    }
+    let skippedLargeCount = 0;
+    const keepMirrorEntry = (relPath, attrs) => {
+      if (attrs.isDirectory()) return isMirrorDir(relPath);
+      if (!isMirrorFile(relPath)) return false;
+      if (isTooLargeForMirror(relPath, attrs.size)) { skippedLargeCount++; return false; }
+      return true;
+    };
+    const sftpCount = await getDirSftp(sftp, remoteRoot, newMirrorDir, keepMirrorEntry);
+    return { fileCount: sftpCount.ok, skippedLargeCount, skippedNameCount: 0 };
+  } finally {
+    conn.end();
+  }
+}
+
+// 큰 폴더는 서버의 find에서 건너뛰고, 나머지 규칙은 isMirrorFile로 거른다
+async function listMirrorFiles(conn, remoteRoot) {
+  const skipDirNames = [...MIRROR_SKIP_DIRS].map((dirName) => `-name ${q(dirName)}`).join(' -o ');
+  const findFiles = (sizeFilter) => `cd ${q(remoteRoot)} && find . -type d \\( ${skipDirNames} -o -name '.?*' ! -name ${q(NEXT_BUILD_DIR)} \\) -prune -o -type f ${sizeFilter} -print0`;
+  const toRelPaths = (findOutput) => findOutput.split('\0').filter(Boolean).map((found) => found.replace(/^\.\//, ''));
+  // 파일 이름을 바이트 그대로 tar에 돌려주려고 latin1로 받는다 (거르는 규칙은 영문 이름·확장자만 본다)
+  const allFilesRun = await run(conn, findFiles(''), '', 'latin1');
+  if (allFilesRun.code !== 0 && !allFilesRun.out) throw new Error(`파일 목록을 만들 수 없습니다: ${allFilesRun.err.trim()}`);
+  const largeFilesRun = await run(conn, findFiles(`-size +${MIRROR_MAX_FILE_BYTES / 1024}k`), '', 'latin1');
+  const largeFiles = new Set(toRelPaths(largeFilesRun.out));
+  const candidateFiles = toRelPaths(allFilesRun.out).filter(isMirrorFile);
+  // 맥 파일 시스템은 UTF-8이 아닌 이름(EUC-KR 등)으로 파일을 만들 수 없어서 받지 않는다
+  const utf8NamedFiles = candidateFiles.filter(isUtf8FileName);
+  const mirrorFiles = utf8NamedFiles.filter((relPath) => !largeFiles.has(relPath) || relPath.endsWith('.map'));
+  return { mirrorFiles, skippedLargeCount: utf8NamedFiles.length - mirrorFiles.length, skippedNameCount: candidateFiles.length - utf8NamedFiles.length };
+}
+
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+function isUtf8FileName(latin1Name) {
+  try {
+    strictUtf8.decode(Buffer.from(latin1Name, 'latin1'));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isMirrorDir(relDir) {
+  const dirNames = relDir.split('/');
+  return dirNames.every((dirName, index) => {
+    if (MIRROR_SKIP_DIRS.has(dirName)) return false;
+    if (dirName.startsWith('.') && dirName !== NEXT_BUILD_DIR) return false;
+    return !(dirNames[index - 1] === NEXT_BUILD_DIR && NEXT_SKIP_DIRS.has(dirName));
+  });
+}
+
+function isMirrorFile(relPath) {
+  const dirNames = relPath.split('/');
+  const fileName = dirNames.pop();
+  if (dirNames.length && !isMirrorDir(dirNames.join('/'))) return false;
+  if (dirNames.includes(NEXT_BUILD_DIR)) return fileName.endsWith('.map') || (dirNames.includes('server') && fileName.endsWith('.js'));
+  if (fileName.startsWith('.')) return MIRROR_HIDDEN_FILES_KEPT.has(fileName);
+  return !MIRROR_SKIP_EXTENSIONS.has(path.posix.extname(fileName).toLowerCase());
+}
+
+// .map은 크기와 상관없이 받는다 (원본을 꺼낸 뒤 지운다)
+const isTooLargeForMirror = (relPath, size) => size > MIRROR_MAX_FILE_BYTES && !relPath.endsWith('.map');
+
+// .next 안의 .map에서 원본 소스를 <프로젝트>/_map_sources/<원래 경로>로 꺼낸다
+// 원본을 꺼낸 .next는 지우고, .map이 없는 .next는 서버 JS를 그대로 둔다
+function extractNextMapSources(mirrorDir) {
+  const mapFiles = fs.readdirSync(mirrorDir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.map'))
+    .map((entry) => path.join(entry.parentPath, entry.name))
+    .filter((mapFile) => path.relative(mirrorDir, mapFile).split(path.sep).includes(NEXT_BUILD_DIR));
+  const writtenSources = new Set();
+  const extractedBuildDirs = new Set();
+  for (const mapFile of mapFiles) {
+    const buildDir = outermostNextBuildDir(mapFile);
+    const projectDir = path.dirname(buildDir);
+    for (const { sourcePath, sourceContent } of readMapSources(mapFile, projectDir)) {
+      const sourceFile = path.join(projectDir, MAP_SOURCES_DIR, sourcePath);
+      if (writtenSources.has(sourceFile)) continue;
+      try {
+        fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+        fs.writeFileSync(sourceFile, sourceContent);
+      } catch (e) {
+        console.error(`원본을 꺼내지 못함: ${path.relative(mirrorDir, sourceFile)} (${e.code || e.message})`);
+        continue;
+      }
+      writtenSources.add(sourceFile);
+      extractedBuildDirs.add(buildDir);
+    }
+  }
+  for (const buildDir of extractedBuildDirs) fs.rmSync(buildDir, { recursive: true, force: true });
+  return writtenSources.size;
+}
+
+// standalone 빌드처럼 .next 안에 .next가 또 있으면 바깥 .next가 프로젝트의 빌드 폴더다
+function outermostNextBuildDir(mapFile) {
+  const pathParts = mapFile.split(path.sep);
+  return pathParts.slice(0, pathParts.indexOf(NEXT_BUILD_DIR) + 1).join(path.sep);
+}
+
+// sections로 나뉜 .map도 읽는다. 프로젝트 밖·라이브러리·번들러 내부 소스는 뺀다
+function readMapSources(mapFile, projectDir) {
+  let sourceMap;
+  try {
+    sourceMap = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
+  } catch (e) {
+    return [];
+  }
+  const sourceMaps = sourceMap.sections ? sourceMap.sections.map((section) => section.map).filter(Boolean) : [sourceMap];
+  return sourceMaps.flatMap((partMap) => (partMap.sources || []).map((source, index) => ({
+    sourcePath: projectSourcePath(source, path.dirname(mapFile), projectDir),
+    sourceContent: partMap.sourcesContent?.[index],
+  }))).filter(({ sourcePath, sourceContent }) => sourcePath && typeof sourceContent === 'string' && !sourceContent.startsWith(UNREADABLE_SOURCE_MARK));
+}
+
+// turbopack:///[project]/src/a.ts, webpack://_N_E/./src/a.ts, ../../src/a.ts → src/a.ts
+function projectSourcePath(source, mapDir, projectDir) {
+  let sourcePath;
+  try {
+    sourcePath = decodeURIComponent(source.replace(/\?.*$/, ''));
+  } catch (e) {
+    return '';
+  }
+  if (/^turbopack:\/\/\//.test(sourcePath)) {
+    if (!sourcePath.startsWith('turbopack:///[project]/')) return '';
+    sourcePath = sourcePath.slice('turbopack:///[project]/'.length);
+  } else if (/^webpack:\/\//.test(sourcePath)) {
+    sourcePath = sourcePath.replace(/^webpack:\/\/[^/]*\//, '');
+  } else if (/^[a-z]+:/i.test(sourcePath)) {
+    return '';
+  } else {
+    sourcePath = path.relative(projectDir, path.resolve(mapDir, sourcePath)).split(path.sep).join('/');
+  }
+  const normalized = path.posix.normalize(sourcePath).replace(/^(\.\/)+/, '');
+  if (!normalized || normalized === '.' || normalized.startsWith('..') || path.posix.isAbsolute(normalized)) return '';
+  const sourceParts = normalized.split('/');
+  // [turbopack] 같은 번들러 내부 경로와 data: 처럼 파일이 아닌 소스는 이름에 [ : < 가 들어간다
+  if (sourceParts.some((sourcePart) => sourcePart === 'node_modules' || /[[:<>]/.test(sourcePart))) return '';
+  // page.tsx/__nextjs-internal-proxy.mjs 처럼 실제 소스 파일 아래에 붙은 번들러의 가상 파일
+  if (sourceParts.slice(0, -1).some((sourcePart) => /\.[cm]?[jt]sx?$/.test(sourcePart))) return '';
+  return normalized;
+}
+
+function replaceMirrorDir(alias, newMirrorDir) {
+  const mirrorDir = path.join(MIRROR, alias);
+  const oldMirrorDir = `${newMirrorDir}_old`;
+  if (fs.existsSync(mirrorDir)) fs.renameSync(mirrorDir, oldMirrorDir);
+  fs.renameSync(newMirrorDir, mirrorDir);
+  fs.rmSync(oldMirrorDir, { recursive: true, force: true });
 }
 
 // 로컬 사본만 지운다 (서버는 건드리지 않음). 범위는 work/<별칭>/ 안
@@ -794,12 +1030,13 @@ function cmdSetNew(cmd, name, a, b) {
     if (!name) fail('사용법: sshq new <별칭> [root] [설명]');
     if (all[name]) fail(`이미 있는 별칭: ${name}`);
     if (name === GLOBAL_KEY || name === ALL_SERVERS) fail(`별칭으로 쓸 수 없는 이름: ${name}`);
-    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '', projects: [], desc: b || '', mode: '', sudo: [] };
+    all[name] = { host: '', port: 22, user: '', password: '', key: '', root: a || '', projects: [], desc: b || '', mode: '', mirror: '', sudo: [] };
   } else {
     if (!name || !a || b === undefined) fail(`사용법: sshq set <별칭> <${EDITABLE.join('|')}> <값>`);
     if (!all[name]) fail(`별칭 없음: ${name} (있는 별칭: ${Object.keys(all).join(', ')})`);
     if (!EDITABLE.includes(a)) fail(`수정할 수 없는 항목: ${a} (가능: ${EDITABLE.join(', ')})`);
     if (a === 'mode' && !MODES.includes(b)) fail('mode는 readonly 또는 ""(빈 값)만 쓸 수 있습니다.');
+    if (a === 'mirror' && !MIRROR_MODES.includes(b)) fail('mirror는 off 또는 ""(빈 값)만 쓸 수 있습니다.');
     const cur = all[name].projects || [];
     let v = b;
     if (a === 'projects') {
@@ -873,11 +1110,11 @@ function cmdList() {
   const repo = url ? url.replace(/\.git$/, '').split(/[/:]/).pop() : path.basename(git('rev-parse --show-toplevel') || process.cwd());
   console.log(`현재 프로젝트: ${repo}`);
   if (globalSettings.sudo.length) console.log(`모든 서버 sudo: ${globalSettings.sudo.join(', ')}`);
-  console.log(['', '별칭', 'host', 'user', '인증', 'root', '모드', 'sudo', '프로젝트', '설명'].join('\t'));
+  console.log(['', '별칭', 'host', 'user', '인증', 'root', '모드', '사본', 'sudo', '프로젝트', '설명'].join('\t'));
   for (const [k, c] of Object.entries(all)) {
     const mark = repo && (c.projects || []).includes(repo) ? '*' : '';
     const auth = c.key ? '키' : c.password ? '비밀번호' : c.host ? 'agent' : '';
-    console.log([mark, k, c.host, c.user, auth, c.root, c.mode, c.sudo.join(','), (c.projects || []).join(','), c.desc].map((v) => (v == null ? '' : v)).join('\t'));
+    console.log([mark, k, c.host, c.user, auth, c.root, c.mode, c.mirror, c.sudo.join(','), (c.projects || []).join(','), c.desc].map((v) => (v == null ? '' : v)).join('\t'));
   }
 }
 
@@ -894,6 +1131,7 @@ async function main() {
     case 'log': return cmdLog(a1, a2);
     case 'clean': return cmdClean(a1, a2);
     case 'backup': return cmdBackup(a1, a2);
+    case 'mirror': return cmdMirror(a1);
     case 'version': return cmdVersion();
     case 'update': return cmdUpdate();
     case 'exec': return cmdRun(a1, a2, 'exec');
