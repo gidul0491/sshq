@@ -27,10 +27,15 @@ const SUDO_PROMPT = 'sshq_sudo_prompt:';
 // sudo-allow·sudo-remove에서 모든 서버를 뜻하는 인자와, 전체 서버 설정을 담는 sshq.json 키
 const ALL_SERVERS = '--all';
 const GLOBAL_KEY = '_global';
-// 승인 없이 sudo 목록이 늘어나지 않도록 sudo-allow는 Claude Code의 ask 규칙이 있어야 실행한다
-const SUDO_ALLOW_RULES = process.platform === 'win32'
-  ? ['Bash(sshq sudo-allow *)', 'PowerShell(sshq sudo-allow *)']
-  : ['Bash(sshq sudo-allow *)'];
+// 사용자 승인 없이 권한·접속정보가 바뀌지 않도록 이 명령들은 Claude Code의 ask 규칙이 있어야 실행한다
+const askRulesFor = (command) => (process.platform === 'win32'
+  ? [`Bash(sshq ${command} *)`, `PowerShell(sshq ${command} *)`]
+  : [`Bash(sshq ${command} *)`]);
+// 접속정보는 대화·명령줄에 남지 않도록 set-auth의 표준 입력(JSON)으로만 받는다
+const AUTH_FIELDS = ['host', 'port', 'user', 'password', 'key', 'passphrase'];
+const SECRET_FIELDS = ['password', 'passphrase'];
+// set-auth·remove 전에 sshq.json을 여기에 백업한다
+const CONFIG_BACKUP_DIR = path.join(BACKUP, '_sshq_json');
 
 const fail = (msg, code = 1) => { console.error(msg); process.exit(code); };
 if (Number(process.versions.node.split('.')[0]) < 22) fail(`Node 22 이상이 필요합니다. (현재: ${process.version})`);
@@ -55,10 +60,13 @@ const USAGE = `사용법:
   sshq sudo-remove <별칭|--all> "<명령>"  승인된 sudo 명령 빼기
   sshq set <별칭> <root|projects|desc|mode|mirror> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "", mirror는 off 또는 "")
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)
+  sshq show [별칭]                       별칭 정보를 JSON으로 (비밀번호는 있는지만)
+  sshq set-auth <별칭> < 접속정보.json    host·port·user·password·key·passphrase를 표준 입력으로 바꾸기 (사용자 승인 필요)
+  sshq remove <별칭>                     별칭 지우기, 지우기 전 sshq.json은 backup/_sshq_json/에 (사용자 승인 필요)
   sshq version                           설치된 버전과 새 버전 확인
   sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'version', 'update', 'help'];
+const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'show', 'set-auth', 'remove', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -999,7 +1007,7 @@ function cmdSudoList(listAction, sudoTarget, sudoCommand) {
   if (!sudoOwner) fail(`별칭 없음: ${sudoTarget} (있는 별칭: ${Object.keys(all).join(', ')})`);
   const entry = sudoCommand.trim().split(/\s+/).join(' ');
   if (listAction === 'sudo-allow') {
-    const missingRules = missingSudoAllowRules();
+    const missingRules = missingAskRules('sudo-allow');
     if (missingRules.length) fail(`먼저 ~/.claude/settings.json의 permissions.ask에 추가하세요: ${missingRules.join(', ')}`);
     const pipeSegments = splitPipes(entry);
     if (!pipeSegments || pipeSegments.length > 1 || /["'\\]/.test(entry)) fail('sudo 승인은 명령과 인자만 쓸 수 있습니다. 예: pm2 restart');
@@ -1015,15 +1023,107 @@ function cmdSudoList(listAction, sudoTarget, sudoCommand) {
   console.log(`${forAllServers ? '모든 서버' : sudoTarget} sudo 승인 목록: ${sudoOwner.sudo.join(', ') || '없음'}${alsoGlobal}`);
 }
 
-function missingSudoAllowRules() {
+function missingAskRules(command) {
+  const neededRules = askRulesFor(command);
   let askRules = [];
   try {
     askRules = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).permissions?.ask || [];
   } catch (e) {
-    return SUDO_ALLOW_RULES;
+    return neededRules;
   }
-  return SUDO_ALLOW_RULES.filter((rule) => !askRules.includes(rule));
+  return neededRules.filter((rule) => !askRules.includes(rule));
 }
+
+// ---------- 접속정보 (show·set-auth·remove) ----------
+// 별칭 하나 또는 전체를 JSON으로 보여준다. 비밀번호·passphrase·서버 지문은 있는지만 보여준다
+function cmdShow(alias) {
+  if (alias && !all[alias]) fail(`별칭 없음: ${alias} (있는 별칭: ${Object.keys(all).join(', ')})`);
+  const shownServers = alias ? publicServerInfo(alias) : Object.keys(all).map(publicServerInfo);
+  console.log(JSON.stringify(shownServers, null, 2));
+}
+
+// 표준 입력의 JSON에서 들어온 항목만 바꾼다. password·key·passphrase는 빈 문자열이면 그대로 두고 null이면 지운다
+// host·port가 바뀌면 다른 서버이므로 저장된 서버 지문을 지운다
+function cmdSetAuth(alias) {
+  requireAskRules('set-auth');
+  if (!all[alias]) fail(`별칭 없음: ${alias} (먼저 sshq new ${alias || '<별칭>'})`);
+  const authInput = readAuthInput();
+  const server = all[alias];
+  const changedFields = [];
+  for (const [field, inputValue] of Object.entries(authInput)) {
+    const keepSecret = (SECRET_FIELDS.includes(field) || field === 'key') && inputValue === '';
+    const newValue = field === 'port' ? Number(inputValue) || 22 : inputValue ?? '';
+    if (keepSecret || server[field] === newValue) continue;
+    server[field] = newValue;
+    changedFields.push(field);
+  }
+  if (!changedFields.length) return console.log(`바뀐 항목 없음: ${alias}`);
+  if (changedFields.includes('host') || changedFields.includes('port')) server.hostkey = '';
+  backupConfigFile();
+  save();
+  logAct(alias, 'set-auth', changedFields.join(','));
+  console.log(`${alias} 접속정보 바꿈: ${changedFields.join(', ')}`);
+  console.log(JSON.stringify(publicServerInfo(alias), null, 2));
+}
+
+function cmdRemove(alias) {
+  requireAskRules('remove');
+  if (!all[alias]) fail(`별칭 없음: ${alias} (있는 별칭: ${Object.keys(all).join(', ')})`);
+  const backupFile = backupConfigFile();
+  delete all[alias];
+  save();
+  logAct(alias, 'remove', `sshq.json 백업 ${backupFile}`);
+  console.log(`별칭 지움: ${alias}\n지우기 전 sshq.json: ${backupFile}`);
+}
+
+function requireAskRules(command) {
+  const missingRules = missingAskRules(command);
+  if (missingRules.length) fail(`먼저 ~/.claude/settings.json의 permissions.ask에 추가하세요: ${missingRules.join(', ')}`);
+}
+
+function readAuthInput() {
+  let authInput;
+  try {
+    authInput = JSON.parse(fs.readFileSync(0, 'utf8'));
+  } catch (e) {
+    fail(`표준 입력에 접속정보 JSON을 넣으세요. 예: {"host":"1.2.3.4","port":22,"user":"simg","password":"..."} (${e.message})`);
+  }
+  if (!authInput || typeof authInput !== 'object' || Array.isArray(authInput)) fail('접속정보는 JSON 객체여야 합니다.');
+  const unknownFields = Object.keys(authInput).filter((field) => !AUTH_FIELDS.includes(field));
+  if (unknownFields.length) fail(`넣을 수 없는 항목: ${unknownFields.join(', ')} (가능: ${AUTH_FIELDS.join(', ')})`);
+  return authInput;
+}
+
+function backupConfigFile() {
+  fs.mkdirSync(CONFIG_BACKUP_DIR, { recursive: true, mode: 0o700 });
+  const backupFile = path.join(CONFIG_BACKUP_DIR, `sshq.json.bak_${ts()}`);
+  fs.copyFileSync(FILE, backupFile);
+  fs.chmodSync(backupFile, 0o600);
+  return backupFile;
+}
+
+function publicServerInfo(alias) {
+  const server = all[alias];
+  return {
+    alias,
+    host: server.host,
+    port: Number(server.port) || 22,
+    user: server.user,
+    auth: authLabel(server),
+    hasPassword: Boolean(server.password),
+    key: server.key || '',
+    hasPassphrase: Boolean(server.passphrase),
+    hasHostkey: Boolean(server.hostkey),
+    root: server.root,
+    mode: server.mode,
+    mirror: server.mirror,
+    sudo: server.sudo,
+    projects: server.projects,
+    desc: server.desc,
+  };
+}
+
+const authLabel = (server) => (server.key ? '키' : server.password ? '비밀번호' : server.host ? 'agent' : '');
 
 function cmdSetNew(cmd, name, a, b) {
   if (cmd === 'new') {
@@ -1050,9 +1150,8 @@ function cmdSetNew(cmd, name, a, b) {
     all[name][a] = v;
   }
   save();
-  const { password, key, passphrase, hostkey, ...shown } = all[name];
-  const ok = shown.host && shown.user && (password || key);
-  console.log(`${name} = ${JSON.stringify(shown)}${ok ? '' : ' (접속정보 미입력)'}`);
+  const shownServer = publicServerInfo(name);
+  console.log(`${name} = ${JSON.stringify(shownServer)}${shownServer.host && shownServer.user && shownServer.auth ? '' : ' (접속정보 미입력)'}`);
 }
 
 // ---------- 버전 ----------
@@ -1113,7 +1212,7 @@ function cmdList() {
   console.log(['', '별칭', 'host', 'user', '인증', 'root', '모드', '사본', 'sudo', '프로젝트', '설명'].join('\t'));
   for (const [k, c] of Object.entries(all)) {
     const mark = repo && (c.projects || []).includes(repo) ? '*' : '';
-    const auth = c.key ? '키' : c.password ? '비밀번호' : c.host ? 'agent' : '';
+    const auth = authLabel(c);
     console.log([mark, k, c.host, c.user, auth, c.root, c.mode, c.mirror, c.sudo.join(','), (c.projects || []).join(','), c.desc].map((v) => (v == null ? '' : v)).join('\t'));
   }
 }
@@ -1140,6 +1239,9 @@ async function main() {
     case 'sudo-remove': return cmdSudoList(a0, a1, a2);
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
+    case 'show': return cmdShow(a1);
+    case 'set-auth': return cmdSetAuth(a1);
+    case 'remove': return cmdRemove(a1);
     default:
       if (CMDS.includes(a0)) fail(USAGE);
       return cmdRun(a0, a1, 'read');

@@ -29,6 +29,9 @@ sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우�
 sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
 sshq set <별칭> mirror off                # mirror --all에서 빼기 (""면 다시 포함)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가 (접속정보는 빈칸)
+sshq show [별칭]                         # 별칭 정보를 JSON으로 (비밀번호는 있는지만)
+sshq set-auth <별칭> < 접속정보.json      # host·port·user·password·key·passphrase를 표준 입력으로 바꾸기 (승인)
+sshq remove <별칭>                        # 별칭 지우기, 지우기 전 sshq.json은 backup/_sshq_json/에 (승인)
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
 ```
@@ -90,6 +93,8 @@ sshq update                              # 새 버전으로 업데이트
 - 사용자가 서버 용도를 설명하면 `desc`를 채운다. 근거 없이 추측으로 채우지 않는다.
 - 사용자가 새 서버를 추가하라고 하면 `sshq new`로 양식만 만들고, 사용자에게 `sshq.json`에서 해당 별칭의 host·user·password 또는 key를 채워 달라고 한다. 별칭 이름은 기존 별칭처럼 짓되, 애매하면 묻는다.
 - host·port·user·password·key·hostkey·sudo는 사용자만 수정한다(sudo는 `sudo-allow` 승인으로). 이 값을 대화로 받아도 직접 넣지 말고 사용자가 파일에 넣게 한다.
+- `set-auth`는 사용자나 봇의 Slack `/sshq` 명령이 쓰는 명령이다. AI는 실행하지 않는다. `remove`는 사용자가 별칭을 지우라고 할 때만 실행한다.
+- 별칭 정보를 확인할 때는 `sshq show <별칭>`을 쓴다.
 
 ## 하지 않는 것
 - 접속정보 파일 `sshq.json`을 직접 읽거나 편집하지 않는다. `~/.ssh`의 키 파일도 읽지 않는다.

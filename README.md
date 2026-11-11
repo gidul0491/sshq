@@ -42,7 +42,7 @@ node $HOME\git\sshq\install.js
 
 ```
 "allow": [ "Bash(sshq *)", "Edit(~/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq set-auth *)", "Bash(sshq remove *)" ],
 "deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)" ]
 ```
 
@@ -52,7 +52,7 @@ Windows에서는 Claude Code가 PowerShell로 실행할 때를 위해 같은 규
 
 ```
 "allow": [ "Bash(sshq *)", "PowerShell(sshq *)", "Edit(//c/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq set-auth *)", "Bash(sshq remove *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)", "PowerShell(sshq set-auth *)", "PowerShell(sshq remove *)" ],
 "deny":  [ "Read(//c/git/sshq/sshq.json)", "Edit(//c/git/sshq/sshq.json)" ]
 ```
 
@@ -80,6 +80,9 @@ sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우�
 sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
 sshq set <별칭> mirror off                # mirror --all에서 빼기 (""면 다시 포함)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
+sshq show [별칭]                         # 별칭 정보를 JSON으로 (비밀번호는 있는지만)
+sshq set-auth <별칭> < 접속정보.json      # host·port·user·password·key·passphrase를 표준 입력으로 바꾸기 (승인)
+sshq remove <별칭>                        # 별칭 지우기, 지우기 전 sshq.json은 backup/_sshq_json/에 (승인)
 sshq version                             # 설치된 버전과 새 버전 확인
 sshq update                              # 새 버전으로 업데이트
 ```
@@ -101,7 +104,10 @@ sshq update                              # 새 버전으로 업데이트
 - `sudo`는 그 별칭의 `sudo` 목록이나 모든 서버 목록(`sshq.json`의 `_global`)에 있는 명령만 실행한다. 단어 단위로 앞부분이 같아야 한다(`pm2`는 모든 pm2 명령, `pm2 restart`는 restart만). `;` `&&` `>` 등은 거부하고, `|` 뒤에는 조회 명령만 쓸 수 있다.
 - sudo 비밀번호는 별칭의 `password`를 쓰고, 서버가 물을 때만 보낸다. 틀리면 다시 시도하지 않는다. `password`가 비어 있으면 서버의 sudo 설정이 비밀번호를 묻지 않는 경우에만 실행된다.
 - `--all`로 승인한 명령은 앞으로 추가할 서버에도 적용된다. `readonly` 별칭에서는 실행되지 않는다. 변경 기록은 `sshq log --all`로 본다. `_global`과 `--all`은 별칭으로 쓸 수 없다.
-- `sudo-allow`는 `ask` 규칙이 없으면 실행되지 않는다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
+- `set-auth`는 접속정보를 명령줄이 아닌 표준 입력의 JSON으로 받는다(프로세스 목록·셸 기록에 남지 않게). 들어온 항목만 바꾸고, `password`·`key`·`passphrase`는 빈 문자열이면 그대로 두고 `null`이면 지운다. host·port가 바뀌면 저장된 서버 지문을 지워 다음 접속 때 새로 저장한다. 예: `echo '{"host":"1.2.3.4","user":"simg","password":"..."}' | sshq set-auth <별칭>`
+- `set-auth`·`remove`는 바꾸기 전 sshq.json을 `backup/_sshq_json/sshq.json.bak_<시각>`에 백업하고, 바꾼 항목 이름(값은 빼고)을 `log/<별칭>.log`에 남긴다.
+- `show`는 비밀번호·passphrase·서버 지문을 값 대신 있는지(`hasPassword` 등)로만 보여준다.
+- `sudo-allow`·`set-auth`·`remove`는 `ask` 규칙이 없으면 실행되지 않는다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
 - `mode`가 `readonly`인 별칭은 put·restore·del·exec·sudo를 거부한다. 조회·get·diff·backup은 된다.
 - `del`은 지우지 않고 서버 홈의 `~/_sshq_to_delete/` 아래 원래 경로로 옮긴다. 같은 이름이 있으면 뒤에 `_<시각>`을 붙인다. 옮긴 뒤 원래 자리에서 사라졌는지 확인한다.
 - `~/_sshq_backup`, `~/_sshq_to_delete` 폴더 권한은 sshq가 700(본인만)으로 맞춘다.
