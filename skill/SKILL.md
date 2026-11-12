@@ -58,7 +58,7 @@ sshq update                              # 새 버전으로 업데이트
 - `mirror/<별칭>/`이 있으면 서버에 `grep`을 여러 번 보내기 전에 그 사본을 로컬 검색 도구로 먼저 찾는다. 받은 시각은 `mirror/<별칭>/_mirror.json`의 `mirroredAt`에 있고, 답에는 그 시각 기준이라고 밝힌다.
 - 사용자가 최신 코드를 보라고 하면 `sshq mirror <별칭>`으로 다시 받은 뒤 본다.
 - 사본 전체는 10GB를 넘지 않는다. 넘어서 받지 못했다는 출력이 나오면 그 서버 사본은 전에 받은 것이니 받은 시각을 밝힌다.
-- 사본에 없는 것: 숨김 파일·폴더(`.env.example`, `.htaccess`, `.gitignore`만 받음), `node_modules`·`vendor`, 키·인증서, 데이터·문서·압축·이미지 파일, 2MB가 넘는 파일, 이름이 UTF-8이 아닌 파일. 이런 파일이 필요하면 서버에서 직접 본다.
+- 사본에는 코드·설정 파일(js·ts·php·java·sql·json·xml·yml·html·css·md 등)만 있다. 숨김 파일·폴더(`.env.example`, `.htaccess`, `.gitignore`만 받음), `node_modules`·`vendor`, 데이터·로그·문서·이미지 파일, 2MB가 넘는 파일, `logs` 폴더, 서버의 `.gitignore`에 걸린 파일, 이름이 UTF-8이 아닌 파일은 없다. 이런 파일이 필요하면 서버에서 직접 본다.
 - Next.js 빌드(`.next`)는 `.map`에 든 원본 소스를 `<프로젝트>/_map_sources/`에 꺼내 두고 `.next`는 지운다. `.map`이 없는 빌드는 `.next`의 서버 JS를 그대로 둔다.
 - 사본의 설정 파일에 적힌 비밀번호·키는 대화나 답에 옮기지 않는다.
 
