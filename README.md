@@ -97,6 +97,7 @@ sshq update                              # 새 버전으로 업데이트
 - `mirror`는 별칭의 root(없으면 홈)에서 코드만 골라 `mirror/<별칭>/`에 받는다. 매번 임시 폴더에 새로 받은 뒤 기존 사본과 바꾸므로 서버에서 지운 파일은 사본에서도 사라진다. 받은 시각과 파일 수는 `mirror/<별칭>/_mirror.json`에 남는다.
   - 받는 것: 코드·설정 파일만(`MIRROR_CODE_EXTENSIONS`의 확장자와 Dockerfile·Makefile 등). 서버에 섞인 데이터 파일은 확장자가 제각각이라 받을 것을 고른다.
   - 받지 않는 것: 숨김 파일·폴더(`.env.example`, `.htaccess`, `.gitignore`만 받음), `node_modules`, `vendor`, `logs`, `_sshq_backup`, `_sshq_to_delete`, 2MB가 넘는 파일, 이름이 UTF-8이 아닌 파일(맥에서 만들 수 없음).
+  - 이름에 8자리 넘는 숫자(날짜·시각)가 든 json은 프로그램이 쌓은 요청·응답 데이터로 보고 받지 않는다.
   - 서버의 `.gitignore`에 걸린 파일도 받지 않는다. 서버 배포본에는 `.git`이 없는 경우가 많아 `.gitignore`만 받아 로컬 git(`check-ignore --no-index`)으로 판정한다. `.next`는 판정에서 뺀다.
   - Next.js 빌드(`.next`)는 `.map`과 서버 JS만 받는다. `.map`에 원본 소스가 있으면 `<프로젝트>/_map_sources/`에 꺼내고 `.next`는 지운다.
   - `--all`은 접속정보가 있고 `mirror`가 `off`가 아닌 별칭을 모두 받는다. 개인 서버나 데이터만 있는 계정은 `sshq set <별칭> mirror off`로 뺀다.

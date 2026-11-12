@@ -938,8 +938,14 @@ function isMirrorFile(relPath) {
   if (dirNames.length && !isMirrorDir(dirNames.join('/'))) return false;
   if (dirNames.includes(NEXT_BUILD_DIR)) return fileName.endsWith('.map') || (dirNames.includes('server') && fileName.endsWith('.js'));
   if (fileName.startsWith('.')) return MIRROR_HIDDEN_FILES_KEPT.has(fileName);
+  if (isRuntimeDataJson(fileName)) return false;
   return MIRROR_CODE_FILE_NAMES.has(fileName) || MIRROR_CODE_EXTENSIONS.has(path.posix.extname(fileName).toLowerCase());
 }
+
+// 프로그램이 실행하며 쌓는 요청·응답 json 은 이름에 날짜·시각(8자리 넘는 숫자)이 들어간다.
+// 예: 20241007_061023_203407_request.json, signature_1792256475036.json
+// 날짜가 붙는 sql 이관 파일은 코드라서 json 에만 적용한다
+const isRuntimeDataJson = (fileName) => fileName.toLowerCase().endsWith('.json') && /\d{8,}/.test(fileName);
 
 // .map은 크기와 상관없이 받는다 (원본을 꺼낸 뒤 지운다)
 const isTooLargeForMirror = (relPath, size) => size > MIRROR_MAX_FILE_BYTES && !relPath.endsWith('.map');
