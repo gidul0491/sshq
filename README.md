@@ -98,6 +98,8 @@ sshq update                              # 새 버전으로 업데이트
   - 받지 않는 것: 숨김 파일·폴더(`.env.example`, `.htaccess`, `.gitignore`만 받음), `node_modules`, `vendor`, `_sshq_backup`, `_sshq_to_delete`, 키·인증서, 데이터·문서·압축·이미지·폰트 파일, 2MB가 넘는 파일, 이름이 UTF-8이 아닌 파일(맥에서 만들 수 없음).
   - Next.js 빌드(`.next`)는 `.map`과 서버 JS만 받는다. `.map`에 원본 소스가 있으면 `<프로젝트>/_map_sources/`에 꺼내고 `.next`는 지운다.
   - `--all`은 접속정보가 있고 `mirror`가 `off`가 아닌 별칭을 모두 받는다. 개인 서버나 데이터만 있는 계정은 `sshq set <별칭> mirror off`로 뺀다.
+  - 모든 별칭의 사본을 합해 10GB를 넘게 되면 그 별칭은 새로 받은 것을 버리고 전에 받은 사본을 둔다. 실행이 끝나면 전체 크기를 보여 준다.
+  - `remove`로 별칭을 지우면 그 사본도 지운다. sshq.json에 없는 별칭의 사본은 `mirror`를 실행할 때 지운다.
 - 폴더 `put`은 로컬 폴더와 원격을 비교해 바뀐 파일과 새 파일만 같은 시각(묶음)으로 백업·업로드하고, 묶음 내용을 `~/_sshq_backup/.batches/<묶음>.json`에 적어 둔다. 서버에만 있는 파일은 지우지 않는다. `restore --batch`는 바꾼 파일을 묶음 직전 백업으로 되돌리고, 새로 만든 파일은 `~/_sshq_to_delete/`로 옮긴다.
 - `restore`는 이름의 시각으로 가장 최근 백업을 고른다(백업은 원본 수정 시각을 유지하므로 파일 시각으로 고르지 않는다).
 - 서버를 바꾼 작업(put·restore·del·exec·sudo)과 sudo 승인 목록 변경은 `log/<별칭>.log`에 남는다(git 제외).

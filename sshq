@@ -770,6 +770,8 @@ const MIRROR_INFO_FILE = '_mirror.json';
 const MIRROR_SKIP_DIRS = new Set(['node_modules', 'vendor', BAK_DIR, DEL_DIR]);
 const MIRROR_HIDDEN_FILES_KEPT = new Set(['.env.example', '.htaccess', '.gitignore']);
 const MIRROR_MAX_FILE_BYTES = 2 * 1024 * 1024;
+// 모든 별칭의 사본을 합한 크기 한도. 넘으면 그 별칭은 새로 받은 것을 버리고 전에 받은 사본을 둔다
+const MIRROR_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
 // 키·인증서, 고객 자료일 수 있는 데이터·문서 파일, 바이너리
 const MIRROR_SKIP_EXTENSIONS = new Set([
   '.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.ppk', '.crt', '.cer', '.der',
@@ -786,6 +788,7 @@ const MAP_SOURCES_DIR = '_map_sources';
 const UNREADABLE_SOURCE_MARK = 'unable to read source';
 
 async function cmdMirror(mirrorTarget) {
+  removeLeftoverTempDirs();
   for (const alias of mirrorAliases(mirrorTarget)) {
     try {
       await mirrorServer(alias);
@@ -794,6 +797,8 @@ async function cmdMirror(mirrorTarget) {
       process.exitCode = 1;
     }
   }
+  removeMirrorsOfRemovedAliases();
+  console.log(`사본 전체: ${formatGigabytes(mirrorTotalBytes())} / 한도 ${formatGigabytes(MIRROR_MAX_TOTAL_BYTES)}`);
 }
 
 // --all이면 접속정보가 있고 mirror가 off가 아닌 모든 별칭
@@ -817,6 +822,7 @@ async function mirrorServer(alias) {
     const mapSourceCount = extractNextMapSources(newMirrorDir);
     const mirrorInfo = { alias, remoteRoot: remoteRoot === '.' ? '~' : remoteRoot, mirroredAt: new Date().toLocaleString('sv-SE'), ...downloadSummary, mapSourceCount };
     fs.writeFileSync(path.join(newMirrorDir, MIRROR_INFO_FILE), JSON.stringify(mirrorInfo, null, 2) + '\n');
+    checkMirrorTotalLimit(alias, newMirrorDir);
     replaceMirrorDir(alias, newMirrorDir);
     console.log(`${alias}: ${mirrorInfo.remoteRoot} → ${path.join(MIRROR, alias)}/ (파일 ${downloadSummary.fileCount}개, 빌드에서 꺼낸 원본 ${mapSourceCount}개, 큰 파일 건너뜀 ${downloadSummary.skippedLargeCount}개${downloadSummary.skippedNameCount ? `, 이름이 UTF-8이 아닌 파일 건너뜀 ${downloadSummary.skippedNameCount}개` : ''})`);
   } finally {
@@ -977,6 +983,50 @@ function projectSourcePath(source, mapDir, projectDir) {
   return normalized;
 }
 
+// 새 사본으로 바꾸면 전체가 한도를 넘는지 본다. 바뀔 이 별칭의 옛 사본과 다른 별칭의 임시 폴더는 세지 않는다
+function checkMirrorTotalLimit(alias, newMirrorDir) {
+  const otherMirrorBytes = mirrorAliasDirs().filter((mirrorAlias) => mirrorAlias !== alias)
+    .reduce((totalBytes, mirrorAlias) => totalBytes + dirBytes(path.join(MIRROR, mirrorAlias)), 0);
+  const newMirrorBytes = dirBytes(newMirrorDir);
+  if (otherMirrorBytes + newMirrorBytes > MIRROR_MAX_TOTAL_BYTES) {
+    throw new Error(`사본 전체가 한도를 넘어 바꾸지 않았습니다 (이 서버 ${formatGigabytes(newMirrorBytes)} + 다른 서버 ${formatGigabytes(otherMirrorBytes)} > ${formatGigabytes(MIRROR_MAX_TOTAL_BYTES)}). 전에 받은 사본을 그대로 둡니다.`);
+  }
+}
+
+// sshq.json에서 지운 별칭의 사본을 지운다
+function removeMirrorsOfRemovedAliases() {
+  for (const mirrorAlias of mirrorAliasDirs().filter((mirrorAlias) => !all[mirrorAlias])) {
+    removeMirror(mirrorAlias);
+    console.log(`지운 별칭의 사본 지움: ${mirrorAlias}`);
+  }
+}
+
+// 받다가 프로그램이 강제로 끝나 남은 임시 폴더. 지금 다른 실행이 받는 중일 수 있어 하루 지난 것만 지운다
+function removeLeftoverTempDirs() {
+  if (!fs.existsSync(MIRROR)) return;
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  for (const entry of fs.readdirSync(MIRROR, { withFileTypes: true })) {
+    const tempDir = path.join(MIRROR, entry.name);
+    if (entry.isDirectory() && entry.name.startsWith('.tmp_') && fs.statSync(tempDir).mtimeMs < oneDayAgo) fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function removeMirror(alias) {
+  fs.rmSync(path.join(MIRROR, alias), { recursive: true, force: true });
+}
+
+// mirror/ 아래 별칭 폴더 (받는 중인 임시 폴더는 . 으로 시작해서 빠진다)
+function mirrorAliasDirs() {
+  if (!fs.existsSync(MIRROR)) return [];
+  return fs.readdirSync(MIRROR, { withFileTypes: true }).filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => entry.name);
+}
+
+const mirrorTotalBytes = () => mirrorAliasDirs().reduce((totalBytes, mirrorAlias) => totalBytes + dirBytes(path.join(MIRROR, mirrorAlias)), 0);
+const dirBytes = (dir) => fs.readdirSync(dir, { recursive: true, withFileTypes: true })
+  .filter((entry) => entry.isFile())
+  .reduce((totalBytes, entry) => totalBytes + fs.statSync(path.join(entry.parentPath, entry.name)).size, 0);
+const formatGigabytes = (bytes) => `${(bytes / 1024 ** 3).toFixed(2)}GB`;
+
 function replaceMirrorDir(alias, newMirrorDir) {
   const mirrorDir = path.join(MIRROR, alias);
   const oldMirrorDir = `${newMirrorDir}_old`;
@@ -1072,8 +1122,9 @@ function cmdRemove(alias) {
   const backupFile = backupConfigFile();
   delete all[alias];
   save();
+  removeMirror(alias);
   logAct(alias, 'remove', `sshq.json 백업 ${backupFile}`);
-  console.log(`별칭 지움: ${alias}\n지우기 전 sshq.json: ${backupFile}`);
+  console.log(`별칭 지움: ${alias} (코드 사본도 지움)\n지우기 전 sshq.json: ${backupFile}`);
 }
 
 function requireAskRules(command) {
