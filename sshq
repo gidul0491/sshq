@@ -27,8 +27,9 @@ const SUDO_PROMPT = 'sshq_sudo_prompt:';
 // sudo-allow·sudo-remove에서 모든 서버를 뜻하는 인자와, 전체 서버 설정을 담는 sshq.json 키
 const ALL_SERVERS = '--all';
 const GLOBAL_KEY = '_global';
-// 사용자 승인 없이 권한·접속정보가 바뀌지 않도록 이 명령들은 Claude Code의 ask 규칙이 있어야 실행한다
-const askRulesFor = (command) => (process.platform === 'win32'
+// AI가 사용자 몰래 권한·접속정보를 바꾸거나 비밀번호를 보지 않도록, 이 명령들은 Claude Code 설정에
+// 그 명령의 ask(승인 받고 실행) 또는 deny(실행 금지) 규칙이 있어야 실행한다. 사람이나 봇 프로그램이 직접 실행하는 것은 막지 않는다
+const guardRulesFor = (command) => (process.platform === 'win32'
   ? [`Bash(sshq ${command} *)`, `PowerShell(sshq ${command} *)`]
   : [`Bash(sshq ${command} *)`]);
 // 접속정보는 대화·명령줄에 남지 않도록 set-auth의 표준 입력(JSON)으로만 받는다
@@ -61,12 +62,13 @@ const USAGE = `사용법:
   sshq set <별칭> <root|projects|desc|mode|mirror> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "", mirror는 off 또는 "")
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)
   sshq show [별칭]                       별칭 정보를 JSON으로 (비밀번호는 있는지만)
+  sshq show-secret <별칭>                별칭 정보를 비밀번호·passphrase까지 JSON으로 (사용자 승인 필요)
   sshq set-auth <별칭> < 접속정보.json    host·port·user·password·key·passphrase를 표준 입력으로 바꾸기 (사용자 승인 필요)
   sshq remove <별칭>                     별칭 지우기, 지우기 전 sshq.json은 backup/_sshq_json/에 (사용자 승인 필요)
   sshq version                           설치된 버전과 새 버전 확인
   sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'show', 'set-auth', 'remove', 'version', 'update', 'help'];
+const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'show', 'show-secret', 'set-auth', 'remove', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -1103,8 +1105,7 @@ function cmdSudoList(listAction, sudoTarget, sudoCommand) {
   if (!sudoOwner) fail(`별칭 없음: ${sudoTarget} (있는 별칭: ${Object.keys(all).join(', ')})`);
   const entry = sudoCommand.trim().split(/\s+/).join(' ');
   if (listAction === 'sudo-allow') {
-    const missingRules = missingAskRules('sudo-allow');
-    if (missingRules.length) fail(`먼저 ~/.claude/settings.json의 permissions.ask에 추가하세요: ${missingRules.join(', ')}`);
+    requireGuardRules('sudo-allow');
     const pipeSegments = splitPipes(entry);
     if (!pipeSegments || pipeSegments.length > 1 || /["'\\]/.test(entry)) fail('sudo 승인은 명령과 인자만 쓸 수 있습니다. 예: pm2 restart');
     if (entry.split(' ')[0] === 'sudo') fail('sudo를 뺀 명령만 쓰세요. 예: pm2');
@@ -1119,15 +1120,16 @@ function cmdSudoList(listAction, sudoTarget, sudoCommand) {
   console.log(`${forAllServers ? '모든 서버' : sudoTarget} sudo 승인 목록: ${sudoOwner.sudo.join(', ') || '없음'}${alsoGlobal}`);
 }
 
-function missingAskRules(command) {
-  const neededRules = askRulesFor(command);
-  let askRules = [];
+function requireGuardRules(command) {
+  let claudePermissions = {};
   try {
-    askRules = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).permissions?.ask || [];
+    claudePermissions = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).permissions || {};
   } catch (e) {
-    return neededRules;
+    // 설정 파일이 없으면 아래에서 규칙이 없는 것으로 거부한다
   }
-  return neededRules.filter((rule) => !askRules.includes(rule));
+  const guardedRules = [...(claudePermissions.ask || []), ...(claudePermissions.deny || [])];
+  const missingRules = guardRulesFor(command).filter((rule) => !guardedRules.includes(rule));
+  if (missingRules.length) fail(`먼저 ~/.claude/settings.json의 permissions.ask 또는 permissions.deny에 추가하세요: ${missingRules.join(', ')}`);
 }
 
 // ---------- 접속정보 (show·set-auth·remove) ----------
@@ -1138,10 +1140,18 @@ function cmdShow(alias) {
   console.log(JSON.stringify(shownServers, null, 2));
 }
 
+// Slack /sshq 보기처럼 사용자 본인에게만 보이는 곳에서 쓴다. AI가 비밀번호를 읽지 못하도록 deny 규칙을 두는 것이 맞다
+function cmdShowSecret(alias) {
+  requireGuardRules('show-secret');
+  if (!all[alias]) fail(`별칭 없음: ${alias} (있는 별칭: ${Object.keys(all).join(', ')})`);
+  const { password = '', passphrase = '' } = all[alias];
+  console.log(JSON.stringify({ ...publicServerInfo(alias), password, passphrase }, null, 2));
+}
+
 // 표준 입력의 JSON에서 들어온 항목만 바꾼다. password·key·passphrase는 빈 문자열이면 그대로 두고 null이면 지운다
 // host·port가 바뀌면 다른 서버이므로 저장된 서버 지문을 지운다
 function cmdSetAuth(alias) {
-  requireAskRules('set-auth');
+  requireGuardRules('set-auth');
   if (!all[alias]) fail(`별칭 없음: ${alias} (먼저 sshq new ${alias || '<별칭>'})`);
   const authInput = readAuthInput();
   const server = all[alias];
@@ -1163,7 +1173,7 @@ function cmdSetAuth(alias) {
 }
 
 function cmdRemove(alias) {
-  requireAskRules('remove');
+  requireGuardRules('remove');
   if (!all[alias]) fail(`별칭 없음: ${alias} (있는 별칭: ${Object.keys(all).join(', ')})`);
   const backupFile = backupConfigFile();
   delete all[alias];
@@ -1171,11 +1181,6 @@ function cmdRemove(alias) {
   removeMirror(alias);
   logAct(alias, 'remove', `sshq.json 백업 ${backupFile}`);
   console.log(`별칭 지움: ${alias} (코드 사본도 지움)\n지우기 전 sshq.json: ${backupFile}`);
-}
-
-function requireAskRules(command) {
-  const missingRules = missingAskRules(command);
-  if (missingRules.length) fail(`먼저 ~/.claude/settings.json의 permissions.ask에 추가하세요: ${missingRules.join(', ')}`);
 }
 
 function readAuthInput() {
@@ -1337,6 +1342,7 @@ async function main() {
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
     case 'show': return cmdShow(a1);
+    case 'show-secret': return cmdShowSecret(a1);
     case 'set-auth': return cmdSetAuth(a1);
     case 'remove': return cmdRemove(a1);
     default:

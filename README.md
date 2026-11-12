@@ -42,18 +42,18 @@ node $HOME\git\sshq\install.js
 
 ```
 "allow": [ "Bash(sshq *)", "Edit(~/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq set-auth *)", "Bash(sshq remove *)" ],
-"deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)" ]
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq remove *)" ],
+"deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)", "Bash(sshq set-auth *)", "Bash(sshq show-secret *)" ]
 ```
 
-`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기, 제한 없는 명령, sudo 명령 승인만 사용자 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열지 못하게 한다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
+`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기, 제한 없는 명령, sudo 명령 승인, 별칭 지우기만 사용자 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열거나 접속정보를 바꾸거나 비밀번호를 보지 못하게 한다. `set-auth`·`show-secret`은 사람이나 Slack `/sshq`가 직접 실행하는 명령이라 `deny`에 둔다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
 
 Windows에서는 Claude Code가 PowerShell로 실행할 때를 위해 같은 규칙을 `PowerShell(...)`로도 넣는다. 경로는 `C:\git\sshq`라면 `//c/git/sshq/...` 형식으로 쓴다.
 
 ```
 "allow": [ "Bash(sshq *)", "PowerShell(sshq *)", "Edit(//c/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq set-auth *)", "Bash(sshq remove *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)", "PowerShell(sshq set-auth *)", "PowerShell(sshq remove *)" ],
-"deny":  [ "Read(//c/git/sshq/sshq.json)", "Edit(//c/git/sshq/sshq.json)" ]
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq remove *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)", "PowerShell(sshq remove *)" ],
+"deny":  [ "Read(//c/git/sshq/sshq.json)", "Edit(//c/git/sshq/sshq.json)", "Bash(sshq set-auth *)", "Bash(sshq show-secret *)", "PowerShell(sshq set-auth *)", "PowerShell(sshq show-secret *)" ]
 ```
 
 ## 사용
@@ -81,6 +81,7 @@ sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·rest
 sshq set <별칭> mirror off                # mirror --all에서 빼기 (""면 다시 포함)
 sshq new <별칭> [root] [설명]             # 새 서버 양식 추가
 sshq show [별칭]                         # 별칭 정보를 JSON으로 (비밀번호는 있는지만)
+sshq show-secret <별칭>                   # 비밀번호·passphrase까지 보기 (승인, Slack /sshq 보기용)
 sshq set-auth <별칭> < 접속정보.json      # host·port·user·password·key·passphrase를 표준 입력으로 바꾸기 (승인)
 sshq remove <별칭>                        # 별칭 지우기, 지우기 전 sshq.json은 backup/_sshq_json/에 (승인)
 sshq version                             # 설치된 버전과 새 버전 확인
@@ -112,7 +113,7 @@ sshq update                              # 새 버전으로 업데이트
 - `set-auth`는 접속정보를 명령줄이 아닌 표준 입력의 JSON으로 받는다(프로세스 목록·셸 기록에 남지 않게). 들어온 항목만 바꾸고, `password`·`key`·`passphrase`는 빈 문자열이면 그대로 두고 `null`이면 지운다. host·port가 바뀌면 저장된 서버 지문을 지워 다음 접속 때 새로 저장한다. 예: `echo '{"host":"1.2.3.4","user":"simg","password":"..."}' | sshq set-auth <별칭>`
 - `set-auth`·`remove`는 바꾸기 전 sshq.json을 `backup/_sshq_json/sshq.json.bak_<시각>`에 백업하고, 바꾼 항목 이름(값은 빼고)을 `log/<별칭>.log`에 남긴다.
 - `show`는 비밀번호·passphrase·서버 지문을 값 대신 있는지(`hasPassword` 등)로만 보여준다.
-- `sudo-allow`·`set-auth`·`remove`는 `ask` 규칙이 없으면 실행되지 않는다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
+- `sudo-allow`·`set-auth`·`remove`·`show-secret`은 Claude Code 설정에 그 명령의 `ask` 또는 `deny` 규칙이 없으면 실행되지 않는다. AI가 승인 없이 실행하지 못하게 하려는 것이다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
 - `mode`가 `readonly`인 별칭은 put·restore·del·exec·sudo를 거부한다. 조회·get·diff·backup은 된다.
 - `del`은 지우지 않고 서버 홈의 `~/_sshq_to_delete/` 아래 원래 경로로 옮긴다. 같은 이름이 있으면 뒤에 `_<시각>`을 붙인다. 옮긴 뒤 원래 자리에서 사라졌는지 확인한다.
 - `~/_sshq_backup`, `~/_sshq_to_delete` 폴더 권한은 sshq가 700(본인만)으로 맞춘다.
