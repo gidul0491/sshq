@@ -76,6 +76,7 @@ sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실�
 sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인, --all은 모든 서버 (승인)
 sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
+sshq set <별칭> projects <a,b>           # 프로젝트 목록 전체를 바꿈 (+ 없이 하나만 쓰면 그 하나만 남음)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
 sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
 sshq set <별칭> mirror off                # mirror --all에서 빼기 (""면 다시 포함)

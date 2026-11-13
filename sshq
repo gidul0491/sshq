@@ -59,7 +59,9 @@ const USAGE = `사용법:
   sshq sudo <별칭> "<명령>"               승인된 명령을 sudo로 실행
   sshq sudo-allow <별칭|--all> "<명령>"   sudo로 쓸 명령 승인, --all은 모든 서버 (사용자 승인 필요)
   sshq sudo-remove <별칭|--all> "<명령>"  승인된 sudo 명령 빼기
-  sshq set <별칭> <root|projects|desc|mode|mirror> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "", mirror는 off 또는 "")
+  sshq set <별칭> projects +<프로젝트>    이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
+  sshq set <별칭> projects <a,b>         프로젝트 목록 전체를 바꿈 (+ 없이 하나만 쓰면 그 하나만 남음)
+  sshq set <별칭> <root|desc|mode|mirror> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "", mirror는 off 또는 "")
   sshq new <별칭> [root] [설명]           새 서버 양식 추가 (접속정보는 빈칸)
   sshq show [별칭]                       별칭 정보를 JSON으로 (비밀번호는 있는지만)
   sshq show-secret <별칭>                별칭 정보를 비밀번호·passphrase까지 JSON으로 (사용자 승인 필요)
