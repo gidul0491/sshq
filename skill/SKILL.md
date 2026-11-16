@@ -26,8 +26,8 @@ sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인 요청
 sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq secret-allow <별칭> <파일>:<변수>    # decrypt·encrypt가 읽을 서버 설정 파일의 키 허용 (승인)
 sshq secret-remove <별칭> <파일>:<변수>   # 허용한 키 빼기
-sshq decrypt --table <표.tsv> [--out <파일>]      # <열>_encrypted·<열>_key_from·<열>_cipher·<열>_iv 열을 풀어 <열>로
-sshq decrypt --items <목록.json> [--out <파일>]   # [{id, encrypted, cipher, keyFrom|key, iv, ...}] 풀기
+sshq decrypt --table <표.tsv> [--out <파일>] [옵션]   # <열>_encrypted·<열>_iv 등을 풀어 <열>로 (명령의 옵션은 모든 행의 기본값)
+sshq decrypt --items <목록.json> [--out <파일>] [옵션]  # [{id, encrypted, iv, ...}] 풀기 (명령의 옵션은 모든 항목의 기본값)
 sshq decrypt --encrypted <암호문> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]   # 한 건 풀기
 sshq encrypt --plain <값> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]           # 검색용 암호화 (ECB·고정 IV)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
@@ -100,7 +100,8 @@ sshq update                              # 새 버전으로 업데이트
 - 프로그램 코드가 서버 설정 파일(.env 등)의 키로 암복호화하면, 키 값을 보지 않고 `--key-from <별칭>:<파일>:<변수>` 로 자리만 넘긴다. sshq 가 그 키를 서버에서 읽어 안에서만 쓰고, 값은 화면·파일·기록 어디에도 쓰지 않는다. 코드에 키가 직접 적혀 있으면 `--key` 로 준다.
 - 그 키가 허용 목록에 없으면 "허용 목록에 없는 키" 로 거부된다. 어떤 키를 왜 써야 하는지 한 줄로 말하고 `sshq secret-allow <별칭> <파일>:<변수>` 를 실행한다. 사용자가 승인 창에서 허락해야 목록에 들어간다. 허용 목록은 `sshq` 목록의 `secrets` 항목에 나온다.
 - 방식은 코드에서 확인해 그대로 준다: `--cipher`(Node crypto 이름, 예: aes-256-cbc), `--key-encoding utf8|hex|base64`, `--key-derivation raw|sha256|md5|evp`(evp 는 crypto-js·openssl 의 "Salted__" 암호문), `--iv`·`--iv-encoding`, `--iv-prefix-bytes`(IV 가 암호문 앞에 붙은 경우), `--tag-suffix-bytes`(GCM 태그가 뒤에 붙은 경우), `--encoding base64|hex`(암호문).
-- 여러 건은 표(`--table`, TSV 열 이름 `<열>_encrypted`·`<열>_key_from`·`<열>_cipher`·`<열>_iv`·`<열>_<옵션 snake_case>`)나 목록(`--items`, JSON `[{id, encrypted, cipher, keyFrom, iv, ivEncoding, ...}]`)으로 준다. 서버 키는 서로 다른 것마다 한 번씩만 읽는다. 행마다 IV 가 다르면 DB 값에서 SQL 로 잘라 열로 만든다.
+- 여러 건은 표(`--table`, TSV 열 이름 `<열>_encrypted`·`<열>_iv`·`<열>_<옵션 snake_case>`)나 목록(`--items`, JSON `[{id, encrypted, iv, ...}]`)으로 준다. 모든 행이 같은 키·방식이면 `--key-from`·`--key`·`--cipher` 등은 명령에 한 번만 준다(행·항목에 값이 없으면 명령의 값을 쓴다). 행마다 다른 값(IV, 여러 서버의 키)만 열·항목으로 둔다. 서버 키는 서로 다른 것마다 한 번씩만 읽는다. 행마다 IV 가 다르면 DB 값에서 SQL 로 잘라 열로 만든다.
+- 키가 DB 프로시저나 코드에 직접 적혀 있으면 `--key` 로 준다. 마스킹 통로를 지나는 대화에서는 본문을 읽을 때 키가 가린 값(`[암호화키-xxxxxx]`)으로 보이니 그 가린 값을 그대로 넣는다. 실행 직전에 원래 값으로 바뀐다. 표 열에 키를 넣지 않는다(행마다 파일에 키가 남는다).
 - 푼 값은 개인정보다. 마스킹 통로를 지나지 않는 Claude Code 에서는 화면에 찍지 않으니 `--out <파일>` 로 받고, 파일을 직접 열어 보지 않는다. 확인은 화면에 나오는 건수·값 모양(숫자 `#`)으로만 한다.
 - `encrypt` 는 같은 입력이면 같은 암호문이 나오는 방식(ECB, 고정 IV)에서 값으로 DB 를 찾을 때만 쓴다.
 

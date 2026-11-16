@@ -77,8 +77,8 @@ sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인, --all
 sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
 sshq secret-allow <별칭> <파일>:<변수>    # decrypt·encrypt가 읽을 서버 설정 파일의 키 허용 (승인)
 sshq secret-remove <별칭> <파일>:<변수>   # 허용한 키 빼기
-sshq decrypt --table <표.tsv> [--out <파일>]      # <열>_encrypted·<열>_key_from·<열>_cipher·<열>_iv 열을 풀어 <열>로
-sshq decrypt --items <목록.json> [--out <파일>]   # [{id, encrypted, cipher, keyFrom|key, iv, ...}] 풀기
+sshq decrypt --table <표.tsv> [--out <파일>] [옵션]   # <열>_encrypted·<열>_iv 등을 풀어 <열>로 (명령의 옵션은 모든 행의 기본값)
+sshq decrypt --items <목록.json> [--out <파일>] [옵션]  # [{id, encrypted, iv, ...}] 풀기 (명령의 옵션은 모든 항목의 기본값)
 sshq decrypt --encrypted <암호문> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]   # 한 건 풀기
 sshq encrypt --plain <값> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]           # 검색용 암호화 (ECB·고정 IV)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
