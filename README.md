@@ -42,17 +42,17 @@ node $HOME\git\sshq\install.js
 
 ```
 "allow": [ "Bash(sshq *)", "Edit(~/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq remove *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq secret-allow *)", "Bash(sshq remove *)" ],
 "deny":  [ "Read(~/git/sshq/sshq.json)", "Edit(~/git/sshq/sshq.json)", "Bash(sshq set-auth *)", "Bash(sshq show-secret *)" ]
 ```
 
-`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기, 제한 없는 명령, sudo 명령 승인, 별칭 지우기만 사용자 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열거나 접속정보를 바꾸거나 비밀번호를 보지 못하게 한다. `set-auth`·`show-secret`은 사람이나 Slack `/sshq`가 직접 실행하는 명령이라 `deny`에 둔다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
+`allow`는 Claude가 묻지 않고 조회하고 내려받은 사본을 편집하게 하고, `ask`는 옮기기, 제한 없는 명령, sudo 명령 승인, 키 허용, 별칭 지우기만 사용자 승인을 받게 하고, `deny`는 Claude가 접속정보 파일을 열거나 접속정보를 바꾸거나 비밀번호를 보지 못하게 한다. `set-auth`·`show-secret`은 사람이나 Slack `/sshq`가 직접 실행하는 명령이라 `deny`에 둔다. `~/git/sshq`가 아닌 곳에 받았다면 경로를 바꾼다.
 
 Windows에서는 Claude Code가 PowerShell로 실행할 때를 위해 같은 규칙을 `PowerShell(...)`로도 넣는다. 경로는 `C:\git\sshq`라면 `//c/git/sshq/...` 형식으로 쓴다.
 
 ```
 "allow": [ "Bash(sshq *)", "PowerShell(sshq *)", "Edit(//c/git/sshq/work/**)" ],
-"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq remove *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)", "PowerShell(sshq remove *)" ],
+"ask":   [ "Bash(sshq del *)", "Bash(sshq exec *)", "Bash(sshq sudo-allow *)", "Bash(sshq secret-allow *)", "Bash(sshq remove *)", "PowerShell(sshq del *)", "PowerShell(sshq exec *)", "PowerShell(sshq sudo-allow *)", "PowerShell(sshq secret-allow *)", "PowerShell(sshq remove *)" ],
 "deny":  [ "Read(//c/git/sshq/sshq.json)", "Edit(//c/git/sshq/sshq.json)", "Bash(sshq set-auth *)", "Bash(sshq show-secret *)", "PowerShell(sshq set-auth *)", "PowerShell(sshq show-secret *)" ]
 ```
 
@@ -75,6 +75,12 @@ sshq exec <별칭> "<명령>"                 # 제한 없는 명령 (승인)
 sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실행
 sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인, --all은 모든 서버 (승인)
 sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
+sshq secret-allow <별칭> <파일>:<변수>    # decrypt·encrypt가 읽을 서버 설정 파일의 키 허용 (승인)
+sshq secret-remove <별칭> <파일>:<변수>   # 허용한 키 빼기
+sshq decrypt --table <표.tsv> [--out <파일>]      # <열>_encrypted·<열>_key_from·<열>_cipher·<열>_iv 열을 풀어 <열>로
+sshq decrypt --items <목록.json> [--out <파일>]   # [{id, encrypted, cipher, keyFrom|key, iv, ...}] 풀기
+sshq decrypt --encrypted <암호문> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]   # 한 건 풀기
+sshq encrypt --plain <값> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]           # 검색용 암호화 (ECB·고정 IV)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> projects <a,b>           # 프로젝트 목록 전체를 바꿈 (+ 없이 하나만 쓰면 그 하나만 남음)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
@@ -115,7 +121,9 @@ sshq update                              # 새 버전으로 업데이트
 - `set-auth`는 접속정보를 명령줄이 아닌 표준 입력의 JSON으로 받는다(프로세스 목록·셸 기록에 남지 않게). 들어온 항목만 바꾸고, `password`·`key`·`passphrase`는 빈 문자열이면 그대로 두고 `null`이면 지운다. host·port가 바뀌면 저장된 서버 지문을 지워 다음 접속 때 새로 저장한다. 예: `echo '{"host":"1.2.3.4","user":"simg","password":"..."}' | sshq set-auth <별칭>`
 - `set-auth`·`remove`는 바꾸기 전 sshq.json을 `backup/_sshq_json/sshq.json.bak_<시각>`에 백업하고, 바꾼 항목 이름(값은 빼고)을 `log/<별칭>.log`에 남긴다.
 - `show`는 비밀번호·passphrase·서버 지문을 값 대신 있는지(`hasPassword` 등)로만 보여준다.
-- `sudo-allow`·`set-auth`·`remove`·`show-secret`은 Claude Code 설정에 그 명령의 `ask` 또는 `deny` 규칙이 없으면 실행되지 않는다. AI가 승인 없이 실행하지 못하게 하려는 것이다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
+- `decrypt`·`encrypt`는 서버 설정 파일의 키(`--key-from <별칭>:<파일>:<변수>`)를 서버에서 읽어 sshq 안에서만 쓴다. 키 값은 화면·파일·기록 어디에도 쓰지 않고, 쓴 사실만 `log/<별칭>.log` 에 `secret-use` 로 남긴다. 별칭의 허용 목록(`secret-allow`)에 있는 키만 읽는다.
+- `decrypt`의 결과(푼 값)는 사람이 직접 실행했거나 마스킹 통로(`ANTHROPIC_BASE_URL` 이 `http://127.0.0.1:<포트>`)를 지나는 Claude Code 안일 때만 화면에 찍는다. 그 밖의 Claude Code 에서는 `--out <파일>` 로만 받는다. `--out` 이면 화면에는 건수와 값 모양만 나온다.
+- `sudo-allow`·`secret-allow`·`set-auth`·`remove`·`show-secret`은 Claude Code 설정에 그 명령의 `ask` 또는 `deny` 규칙이 없으면 실행되지 않는다. AI가 승인 없이 실행하지 못하게 하려는 것이다. 승인 목록은 `sshq set`으로 고칠 수 없다. `pm2` 전체를 승인하면 `pm2 start`로 어떤 프로그램이든 root로 띄울 수 있으니, 재시작만 필요하면 `pm2 restart`처럼 좁혀서 승인한다.
 - `mode`가 `readonly`인 별칭은 put·restore·del·exec·sudo를 거부한다. 조회·get·diff·backup은 된다.
 - `del`은 지우지 않고 서버 홈의 `~/_sshq_to_delete/` 아래 원래 경로로 옮긴다. 같은 이름이 있으면 뒤에 `_<시각>`을 붙인다. 옮긴 뒤 원래 자리에서 사라졌는지 확인한다.
 - `~/_sshq_backup`, `~/_sshq_to_delete` 폴더 권한은 sshq가 700(본인만)으로 맞춘다.

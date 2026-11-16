@@ -24,6 +24,12 @@ sshq exec <별칭> "<명령>"                 # 제한 없는 명령
 sshq sudo <별칭> "<명령>"                 # 승인된 명령을 sudo로 실행
 sshq sudo-allow <별칭|--all> "<명령>"     # sudo로 쓸 명령 승인 요청, --all은 모든 서버
 sshq sudo-remove <별칭|--all> "<명령>"    # 승인된 sudo 명령 빼기
+sshq secret-allow <별칭> <파일>:<변수>    # decrypt·encrypt가 읽을 서버 설정 파일의 키 허용 (승인)
+sshq secret-remove <별칭> <파일>:<변수>   # 허용한 키 빼기
+sshq decrypt --table <표.tsv> [--out <파일>]      # <열>_encrypted·<열>_key_from·<열>_cipher·<열>_iv 열을 풀어 <열>로
+sshq decrypt --items <목록.json> [--out <파일>]   # [{id, encrypted, cipher, keyFrom|key, iv, ...}] 풀기
+sshq decrypt --encrypted <암호문> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]   # 한 건 풀기
+sshq encrypt --plain <값> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]           # 검색용 암호화 (ECB·고정 IV)
 sshq set <별칭> projects +<프로젝트>      # 이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
 sshq set <별칭> <root|desc> <값>          # 수정, 빈 값("")이면 비우기
 sshq set <별칭> mode readonly             # 읽기 전용 서버로 (put·restore·del·exec·sudo 거부, ""면 해제)
@@ -90,11 +96,19 @@ sshq update                              # 새 버전으로 업데이트
 - 끝나지 않는 명령은 쓰지 않는다. `pm2 logs`는 `--nostream --lines 200`을 붙인다.
 - `sudo` 항목의 명령도 서비스에 바로 영향을 준다. 재시작·삭제 등은 사용자가 요청한 경우에만 한다.
 
+## 암호화된 값을 풀 때 (decrypt·encrypt)
+- 프로그램 코드가 서버 설정 파일(.env 등)의 키로 암복호화하면, 키 값을 보지 않고 `--key-from <별칭>:<파일>:<변수>` 로 자리만 넘긴다. sshq 가 그 키를 서버에서 읽어 안에서만 쓰고, 값은 화면·파일·기록 어디에도 쓰지 않는다. 코드에 키가 직접 적혀 있으면 `--key` 로 준다.
+- 그 키가 허용 목록에 없으면 "허용 목록에 없는 키" 로 거부된다. 어떤 키를 왜 써야 하는지 한 줄로 말하고 `sshq secret-allow <별칭> <파일>:<변수>` 를 실행한다. 사용자가 승인 창에서 허락해야 목록에 들어간다. 허용 목록은 `sshq` 목록의 `secrets` 항목에 나온다.
+- 방식은 코드에서 확인해 그대로 준다: `--cipher`(Node crypto 이름, 예: aes-256-cbc), `--key-encoding utf8|hex|base64`, `--key-derivation raw|sha256|md5|evp`(evp 는 crypto-js·openssl 의 "Salted__" 암호문), `--iv`·`--iv-encoding`, `--iv-prefix-bytes`(IV 가 암호문 앞에 붙은 경우), `--tag-suffix-bytes`(GCM 태그가 뒤에 붙은 경우), `--encoding base64|hex`(암호문).
+- 여러 건은 표(`--table`, TSV 열 이름 `<열>_encrypted`·`<열>_key_from`·`<열>_cipher`·`<열>_iv`·`<열>_<옵션 snake_case>`)나 목록(`--items`, JSON `[{id, encrypted, cipher, keyFrom, iv, ivEncoding, ...}]`)으로 준다. 서버 키는 서로 다른 것마다 한 번씩만 읽는다. 행마다 IV 가 다르면 DB 값에서 SQL 로 잘라 열로 만든다.
+- 푼 값은 개인정보다. 마스킹 통로를 지나지 않는 Claude Code 에서는 화면에 찍지 않으니 `--out <파일>` 로 받고, 파일을 직접 열어 보지 않는다. 확인은 화면에 나오는 건수·값 모양(숫자 `#`)으로만 한다.
+- `encrypt` 는 같은 입력이면 같은 암호문이 나오는 방식(ECB, 고정 IV)에서 값으로 DB 를 찾을 때만 쓴다.
+
 ## 설정을 직접 고치는 경우
 - 사용자가 "여기는 ○○ 서버 쓰는 거야"라고 하면 `sshq` 첫 줄의 현재 프로젝트 이름으로 `sshq set <별칭> projects +<프로젝트>`를 실행한다. projects 전체를 덮어쓰는 `,` 형식은 쓰지 않는다.
 - 사용자가 서버 용도를 설명하면 `desc`를 채운다. 근거 없이 추측으로 채우지 않는다.
 - 사용자가 새 서버를 추가하라고 하면 `sshq new`로 양식만 만들고, 사용자에게 `sshq.json`에서 해당 별칭의 host·user·password 또는 key를 채워 달라고 한다. 별칭 이름은 기존 별칭처럼 짓되, 애매하면 묻는다.
-- host·port·user·password·key·hostkey·sudo는 사용자만 수정한다(sudo는 `sudo-allow` 승인으로). 이 값을 대화로 받아도 직접 넣지 말고 사용자가 파일에 넣게 한다.
+- host·port·user·password·key·hostkey·sudo·secrets는 사용자만 수정한다(sudo는 `sudo-allow`, secrets는 `secret-allow` 승인으로). 이 값을 대화로 받아도 직접 넣지 말고 사용자가 파일에 넣게 한다.
 - `set-auth`·`show-secret`은 사용자나 봇의 Slack `/sshq` 명령이 쓰는 명령이다. AI는 실행하지 않는다. `remove`는 사용자가 별칭을 지우라고 할 때만 실행한다.
 - 별칭 정보를 확인할 때는 `sshq show <별칭>`을 쓴다.
 

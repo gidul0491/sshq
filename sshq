@@ -59,6 +59,14 @@ const USAGE = `사용법:
   sshq sudo <별칭> "<명령>"               승인된 명령을 sudo로 실행
   sshq sudo-allow <별칭|--all> "<명령>"   sudo로 쓸 명령 승인, --all은 모든 서버 (사용자 승인 필요)
   sshq sudo-remove <별칭|--all> "<명령>"  승인된 sudo 명령 빼기
+  sshq secret-allow <별칭> <파일>:<변수>   decrypt·encrypt가 읽을 서버 설정 파일의 키 허용 (사용자 승인 필요)
+  sshq secret-remove <별칭> <파일>:<변수>  허용한 키 빼기
+  sshq decrypt --table <표.tsv> [--out <파일>]       <열>_encrypted·<열>_key_from·<열>_cipher·<열>_iv 열을 풀어 <열>로
+  sshq decrypt --items <목록.json> [--out <파일>]    [{id, encrypted, cipher, keyFrom|key, iv, ...}] 를 풀기
+  sshq decrypt --encrypted <암호문> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]   한 건 풀기
+  sshq encrypt --plain <값> --cipher <방식> --key-from <별칭>:<파일>:<변수> [옵션]           검색용 암호화 (ECB·고정 IV)
+                                         옵션: --key <값> --key-encoding --key-derivation raw|sha256|md5|evp --iv --iv-encoding
+                                               --iv-prefix-bytes --tag-suffix-bytes --encoding base64|hex
   sshq set <별칭> projects +<프로젝트>    이 별칭을 쓰는 프로젝트 추가 (-<프로젝트>는 제거)
   sshq set <별칭> projects <a,b>         프로젝트 목록 전체를 바꿈 (+ 없이 하나만 쓰면 그 하나만 남음)
   sshq set <별칭> <root|desc|mode|mirror> <값>   수정, 빈 값("")이면 비우기 (mode는 readonly 또는 "", mirror는 off 또는 "")
@@ -70,7 +78,7 @@ const USAGE = `사용법:
   sshq version                           설치된 버전과 새 버전 확인
   sshq update                            새 버전으로 업데이트`;
 
-const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'set', 'new', 'show', 'show-secret', 'set-auth', 'remove', 'version', 'update', 'help'];
+const CMDS = ['ls', 'get', 'diff', 'put', 'restore', 'del', 'clean', 'backup', 'mirror', 'log', 'exec', 'sudo', 'sudo-allow', 'sudo-remove', 'secret-allow', 'secret-remove', 'decrypt', 'encrypt', 'set', 'new', 'show', 'show-secret', 'set-auth', 'remove', 'version', 'update', 'help'];
 const argv = process.argv.slice(2);
 if (argv[0] === 'help' || argv[0] === '-h' || argv[0] === '--help') { console.log(USAGE); process.exit(0); }
 
@@ -91,6 +99,7 @@ for (const c of Object.values(all)) {
   c.mode ??= '';
   c.mirror ??= '';
   c.sudo ??= [];
+  c.secrets ??= [];
 }
 const save = () => fs.writeFileSync(FILE, JSON.stringify({ [GLOBAL_KEY]: globalSettings, ...all }, null, 2) + '\n', { mode: 0o600 });
 
@@ -1222,6 +1231,7 @@ function publicServerInfo(alias) {
     mode: server.mode,
     mirror: server.mirror,
     sudo: server.sudo,
+    secrets: server.secrets,
     projects: server.projects,
     desc: server.desc,
   };
@@ -1256,6 +1266,308 @@ function cmdSetNew(cmd, name, a, b) {
   save();
   const shownServer = publicServerInfo(name);
   console.log(`${name} = ${JSON.stringify(shownServer)}${shownServer.host && shownServer.user && shownServer.auth ? '' : ' (접속정보 미입력)'}`);
+}
+
+// ---------- 암복호화 (secret-allow·secret-remove·decrypt·encrypt) ----------
+// 서버 설정 파일(.env 등)의 키를 sshq 밖으로 내보내지 않고 복호화·암호화에만 쓴다. 키 값은 화면·파일·기록 어디에도 쓰지 않는다.
+// 키는 별칭마다 허용 목록(secrets: "<파일>:<변수>")에 있는 것만 읽는다. 목록은 secret-allow 로만 넣고, 그 명령은 승인 규칙이 있어야 실행한다.
+// 복호화 결과(개인정보)는 마스킹 통로를 지나는 Claude Code 이거나 사람이 직접 실행할 때만 화면에 찍고, 그 밖에는 --out 파일로만 쓴다.
+const crypto = require('crypto');
+
+// 요청 하나에 들어가는 항목. 목록(JSON)은 이 이름, 표(TSV)는 <열>_<snake_case 이름>, 명령줄은 --<kebab-case 이름>
+const CRYPTO_FIELDS = ['keyFrom', 'key', 'keyEncoding', 'keyDerivation', 'cipher', 'iv', 'ivEncoding', 'ivPrefixBytes', 'tagSuffixBytes', 'encoding'];
+const snakeCase = (fieldName) => fieldName.replace(/[A-Z]/g, (upper) => `_${upper.toLowerCase()}`);
+
+function cmdSecretList(listAction, alias, secretEntry) {
+  if (!alias || !secretEntry) fail(`사용법: sshq ${listAction} <별칭> <파일>:<변수>`);
+  const server = all[alias];
+  if (!server) fail(`별칭 없음: ${alias} (있는 별칭: ${Object.keys(all).join(', ')})`);
+  const { filePath, variableName } = parseSecretEntry(server, secretEntry);
+  const normalizedEntry = `${filePath}:${variableName}`;
+  if (listAction === 'secret-allow') {
+    requireGuardRules('secret-allow');
+    server.secrets = [...new Set([...server.secrets, normalizedEntry])];
+  } else {
+    if (!server.secrets.includes(normalizedEntry)) fail(`허용 목록에 없습니다: ${normalizedEntry} (허용된 키: ${server.secrets.join(', ') || '없음'})`);
+    server.secrets = server.secrets.filter((allowedEntry) => allowedEntry !== normalizedEntry);
+  }
+  save();
+  logAct(alias, listAction, normalizedEntry);
+  console.log(`${alias} 키 허용 목록: ${server.secrets.join(', ') || '없음'}`);
+}
+
+// 입력: --items <JSON 목록 파일> | --table <TSV 파일> | 명령줄 옵션 한 건(--encrypted). --out 을 주면 결과를 파일에 쓴다
+async function cmdDecrypt(cryptoArgs) {
+  const decryptOptions = parseCryptoArgs(cryptoArgs);
+  const decryptJob = buildDecryptJob(decryptOptions);
+  ensurePlainOutputAllowed(decryptOptions.out);
+  const keyValues = await fetchKeyValues(decryptJob.requests);
+  for (const decryptRequest of decryptJob.requests) decryptRequest.result = decryptOne(decryptRequest, keyValues);
+  writeDecryptResult(decryptJob, decryptOptions.out);
+}
+
+// 같은 입력이면 같은 암호문이 나오는 방식(ECB, 고정 IV)일 때, 찾을 값을 암호화해 DB 에서 그 암호문으로 찾는 데 쓴다
+async function cmdEncrypt(cryptoArgs) {
+  const encryptOptions = parseCryptoArgs(cryptoArgs);
+  if (encryptOptions.plain === undefined) fail('--plain <암호화할 값> 이 필요합니다');
+  const encryptRequest = readSingleRequest(encryptOptions);
+  const keyValues = await fetchKeyValues([encryptRequest]);
+  console.log(encryptText(encryptOptions.plain, encryptRequest, keyValues));
+}
+
+function parseCryptoArgs(cryptoArgs) {
+  const optionValues = {};
+  for (let argIndex = 0; argIndex < cryptoArgs.length; argIndex += 2) {
+    const optionName = cryptoArgs[argIndex];
+    if (!optionName?.startsWith('--') || cryptoArgs[argIndex + 1] === undefined) fail(`옵션 형식이 틀렸습니다: ${optionName ?? ''} (예: --cipher aes-256-cbc)`);
+    optionValues[optionName.slice(2).replace(/-([a-z])/g, (dash, lower) => lower.toUpperCase())] = cryptoArgs[argIndex + 1];
+  }
+  return optionValues;
+}
+
+// requests: 풀 값마다 { 항목들, encrypted, 자리 } — 자리는 결과를 돌려놓을 곳(목록의 id, 표의 행·열)
+function buildDecryptJob(decryptOptions) {
+  if (decryptOptions.items) return buildItemsJob(decryptOptions.items);
+  if (decryptOptions.table) return buildTableJob(decryptOptions.table);
+  if (decryptOptions.encrypted !== undefined) return { kind: 'single', requests: [{ ...readSingleRequest(decryptOptions), encrypted: decryptOptions.encrypted }] };
+  fail('--items <목록.json>, --table <표.tsv>, --encrypted <암호문> 중 하나가 필요합니다');
+}
+
+function readSingleRequest(cryptoOptions) {
+  return Object.fromEntries(CRYPTO_FIELDS.filter((fieldName) => cryptoOptions[fieldName] !== undefined).map((fieldName) => [fieldName, cryptoOptions[fieldName]]));
+}
+
+function buildItemsJob(itemsFile) {
+  let decryptItems;
+  try {
+    decryptItems = JSON.parse(fs.readFileSync(localArg(itemsFile), 'utf8'));
+  } catch (e) {
+    fail(`목록 파일을 읽을 수 없습니다: ${itemsFile} (${e.message})`);
+  }
+  if (!Array.isArray(decryptItems)) fail('목록은 [{ "id": ..., "encrypted": ..., "cipher": ..., "keyFrom" 또는 "key": ... }, ...] 모양이어야 합니다');
+  return { kind: 'items', requests: decryptItems.map((decryptItem, itemIndex) => ({ ...decryptItem, id: decryptItem.id ?? itemIndex })) };
+}
+
+// <열>_encrypted 가 있는 열마다 같은 행의 <열>_key_from·<열>_cipher·<열>_iv 등으로 푼다. 결과는 <열> 하나로 남기고 보조 열은 뺀다
+function buildTableJob(tableFile) {
+  const tableRows = fs.readFileSync(localArg(tableFile), 'utf8').split('\n').filter((tsvLine) => tsvLine !== '').map((tsvLine) => tsvLine.split('\t'));
+  if (tableRows.length === 0) fail(`빈 표입니다: ${tableFile}`);
+  const [headerRow, ...dataRows] = tableRows;
+  const columnPrefixes = headerRow.filter((header) => header.endsWith('_encrypted')).map((header) => header.slice(0, -'_encrypted'.length));
+  if (columnPrefixes.length === 0) fail('표에 <열>_encrypted 열이 없습니다 (예: 주민번호_encrypted, 주민번호_key_from, 주민번호_cipher, 주민번호_iv)');
+  const requests = dataRows.flatMap((dataRow, rowIndex) => columnPrefixes.map((columnPrefix) => {
+    const cellOf = (suffix) => dataRow[headerRow.indexOf(`${columnPrefix}_${suffix}`)];
+    const rowFields = Object.fromEntries(CRYPTO_FIELDS.map((fieldName) => [fieldName, cellOf(snakeCase(fieldName))]).filter(([, cellValue]) => cellValue !== undefined && cellValue !== ''));
+    return { ...rowFields, encrypted: cellOf('encrypted'), rowIndex, columnPrefix };
+  }));
+  return { kind: 'table', headerRow, dataRows, columnPrefixes, requests };
+}
+
+// 사람이 직접 실행했거나 마스킹 통로를 지나는 Claude Code 안이면 화면에 찍어도 된다. 그 밖의 AI 대화에는 개인정보가 그대로 가므로 파일로만 쓴다
+function ensurePlainOutputAllowed(outFile) {
+  if (outFile) return;
+  const isInsideClaudeCode = process.env.CLAUDECODE === '1';
+  const isThroughMaskingGateway = /^http:\/\/127\.0\.0\.1:\d+/.test(process.env.ANTHROPIC_BASE_URL || '');
+  if (isInsideClaudeCode && !isThroughMaskingGateway) fail('마스킹 통로를 지나지 않는 Claude Code 에서는 푼 값을 화면에 찍지 않습니다. --out <파일> 로 받으세요.');
+}
+
+// 요청에 나온 keyFrom 마다 서버 파일을 한 번만 읽는다. 허용 목록에 없는 키는 그 요청만 실패로 둔다
+async function fetchKeyValues(cryptoRequests) {
+  const keyValues = new Map();
+  const keyFromsByAlias = new Map();
+  for (const keyFrom of new Set(cryptoRequests.map((cryptoRequest) => cryptoRequest.keyFrom).filter(Boolean))) {
+    const { alias, secretEntry } = splitKeyFrom(keyFrom);
+    keyFromsByAlias.set(alias, [...(keyFromsByAlias.get(alias) ?? []), { keyFrom, secretEntry }]);
+  }
+  for (const [alias, aliasKeyFroms] of keyFromsByAlias) await readAliasKeys(alias, aliasKeyFroms, keyValues);
+  return keyValues;
+}
+
+// keyFrom: <별칭>:<파일>:<변수>. 파일 경로에 : 가 있어도 되도록 첫 : 와 마지막 : 로 나눈다
+function splitKeyFrom(keyFrom) {
+  const firstColon = keyFrom.indexOf(':');
+  if (firstColon < 0 || firstColon === keyFrom.lastIndexOf(':')) fail(`keyFrom 은 <별칭>:<파일>:<변수> 모양이어야 합니다: ${keyFrom}`);
+  return { alias: keyFrom.slice(0, firstColon), secretEntry: keyFrom.slice(firstColon + 1) };
+}
+
+async function readAliasKeys(alias, aliasKeyFroms, keyValues) {
+  const server = conf(alias, false);
+  const allowedKeyFroms = aliasKeyFroms.map(({ keyFrom, secretEntry }) => ({ keyFrom, ...parseSecretEntry(server, secretEntry) }))
+    .filter(({ keyFrom, filePath, variableName }) => {
+      const isAllowed = server.secrets.includes(`${filePath}:${variableName}`);
+      if (!isAllowed) keyValues.set(keyFrom, { failure: `허용 목록에 없는 키 (sshq secret-allow ${alias} ${filePath}:${variableName})` });
+      return isAllowed;
+    });
+  if (allowedKeyFroms.length === 0) return;
+  const conn = await connect(alias, server);
+  try {
+    const sftp = await sftpOf(conn);
+    const fileTexts = new Map();
+    for (const { filePath } of allowedKeyFroms) {
+      if (!fileTexts.has(filePath)) fileTexts.set(filePath, await pcall((cb) => sftp.readFile(filePath, 'utf8', cb)).catch(() => null));
+    }
+    for (const { keyFrom, filePath, variableName } of allowedKeyFroms) {
+      const keyValue = fileTexts.get(filePath) === null ? undefined : readEnvVariable(fileTexts.get(filePath), variableName);
+      keyValues.set(keyFrom, keyValue === undefined ? { failure: `서버 파일이나 변수를 찾지 못함 (${filePath}:${variableName})` } : { value: keyValue });
+      logAct(alias, 'secret-use', `${filePath}:${variableName}`);
+    }
+  } finally {
+    conn.end();
+  }
+}
+
+function parseSecretEntry(server, secretEntry) {
+  const lastColon = secretEntry.lastIndexOf(':');
+  if (lastColon <= 0 || lastColon === secretEntry.length - 1) fail(`<파일>:<변수> 모양이어야 합니다: ${secretEntry}`);
+  return { filePath: remotePath(server, secretEntry.slice(0, lastColon)), variableName: secretEntry.slice(lastColon + 1) };
+}
+
+// KEY=값, export KEY=값, 따옴표로 감싼 값을 읽는다. 따옴표 없는 값의 " #" 뒤는 주석으로 본다
+function readEnvVariable(envText, variableName) {
+  for (const envLine of envText.split(/\r?\n/)) {
+    const lineMatch = envLine.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*)$/);
+    if (!lineMatch || lineMatch[1] !== variableName) continue;
+    const rawValue = lineMatch[2].trim();
+    const quotedMatch = rawValue.match(/^(['"])(.*)\1$/);
+    if (quotedMatch) return quotedMatch[1] === '"' ? quotedMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"') : quotedMatch[2];
+    return rawValue.replace(/\s+#.*$/, '');
+  }
+  return undefined;
+}
+
+// 실패해도 멈추지 않고 그 칸만 실패로 둔다. 실패 이유에 키·값은 넣지 않는다
+function decryptOne(decryptRequest, keyValues) {
+  if (!decryptRequest.encrypted || decryptRequest.encrypted === 'NULL') return { isEmpty: true };
+  try {
+    const cipherSpec = resolveCipherSpec(decryptRequest, keyValues);
+    let cipherBytes = Buffer.from(decryptRequest.encrypted, decryptRequest.encoding || 'base64');
+    let ivBytes = cipherSpec.ivBytes;
+    if (cipherSpec.isOpensslSalted) {
+      ({ key: cipherSpec.keyBytes, iv: ivBytes } = deriveOpensslKeyAndIv(cipherBytes.subarray(8, 16), cipherSpec.keyText, cipherSpec.cipherName));
+      cipherBytes = cipherBytes.subarray(16);
+    }
+    const ivPrefixBytes = Number(decryptRequest.ivPrefixBytes || 0);
+    if (ivPrefixBytes > 0) [ivBytes, cipherBytes] = [cipherBytes.subarray(0, ivPrefixBytes), cipherBytes.subarray(ivPrefixBytes)];
+    const tagSuffixBytes = Number(decryptRequest.tagSuffixBytes || 0);
+    const authTag = tagSuffixBytes > 0 ? cipherBytes.subarray(cipherBytes.length - tagSuffixBytes) : null;
+    if (authTag) cipherBytes = cipherBytes.subarray(0, cipherBytes.length - tagSuffixBytes);
+    const decipher = crypto.createDecipheriv(cipherSpec.cipherName, cipherSpec.keyBytes, ivOrNull(cipherSpec.cipherName, ivBytes));
+    if (authTag) decipher.setAuthTag(authTag);
+    return { plainText: Buffer.concat([decipher.update(cipherBytes), decipher.final()]).toString('utf8') };
+  } catch (decryptError) {
+    return { failure: decryptError.isCryptoSetupError ? decryptError.message : '풀지 못함 (방식·키·IV·인코딩 확인)' };
+  }
+}
+
+function encryptText(plainText, encryptRequest, keyValues) {
+  const cipherSpec = resolveCipherSpec(encryptRequest, keyValues, true);
+  if (cipherSpec.isOpensslSalted) fail('evp(Salted__) 방식은 매번 다른 암호문이 나와 검색용 암호화에 쓸 수 없습니다');
+  const cipher = crypto.createCipheriv(cipherSpec.cipherName, cipherSpec.keyBytes, ivOrNull(cipherSpec.cipherName, cipherSpec.ivBytes));
+  const encryptedBytes = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+  const authTag = Number(encryptRequest.tagSuffixBytes || 0) > 0 ? cipher.getAuthTag() : Buffer.alloc(0);
+  return Buffer.concat([encryptedBytes, authTag]).toString(encryptRequest.encoding || 'base64');
+}
+
+// 키 값: keyFrom(서버 파일) 또는 key(가린 값이면 명령 실행 직전에 원래 값으로 바뀐 것). 키 만들기: raw·sha256·md5·evp
+function resolveCipherSpec(cryptoRequest, keyValues, failImmediately = false) {
+  const setupFailure = (setupMessage) => {
+    if (failImmediately) fail(setupMessage);
+    throw Object.assign(new Error(setupMessage), { isCryptoSetupError: true });
+  };
+  const cipherName = String(cryptoRequest.cipher || '').toLowerCase();
+  if (!crypto.getCiphers().includes(cipherName)) setupFailure(`모르는 방식: ${cryptoRequest.cipher || '(cipher 없음)'}`);
+  let keyText = cryptoRequest.key;
+  if (cryptoRequest.keyFrom) {
+    const fetchedKey = keyValues.get(cryptoRequest.keyFrom);
+    if (!fetchedKey || fetchedKey.failure) setupFailure(fetchedKey?.failure || `키를 읽지 못함: ${cryptoRequest.keyFrom}`);
+    keyText = fetchedKey.value;
+  }
+  if (keyText === undefined) setupFailure('keyFrom 또는 key 가 필요합니다');
+  const keyDerivation = cryptoRequest.keyDerivation || 'raw';
+  const { keyLength } = crypto.getCipherInfo(cipherName);
+  const ivBytes = cryptoRequest.iv ? Buffer.from(cryptoRequest.iv, cryptoRequest.ivEncoding || 'utf8') : Buffer.alloc(0);
+  if (keyDerivation === 'evp') return { cipherName, keyText, ivBytes, isOpensslSalted: true };
+  const keyBytes = keyDerivation === 'sha256' || keyDerivation === 'md5'
+    ? crypto.createHash(keyDerivation).update(keyText).digest().subarray(0, keyLength)
+    : Buffer.from(keyText, cryptoRequest.keyEncoding || 'utf8');
+  if (!['raw', 'sha256', 'md5'].includes(keyDerivation)) setupFailure(`모르는 keyDerivation: ${keyDerivation} (raw, sha256, md5, evp)`);
+  return { cipherName, keyBytes, ivBytes, isOpensslSalted: false };
+}
+
+// openssl·crypto-js 의 EVP_BytesToKey(md5): 암호문 앞 "Salted__" 뒤 8바이트가 salt 다
+function deriveOpensslKeyAndIv(saltBytes, passphrase, cipherName) {
+  const { keyLength, ivLength = 0 } = crypto.getCipherInfo(cipherName);
+  let derivedBytes = Buffer.alloc(0);
+  let previousBlock = Buffer.alloc(0);
+  while (derivedBytes.length < keyLength + ivLength) {
+    previousBlock = crypto.createHash('md5').update(Buffer.concat([previousBlock, Buffer.from(passphrase, 'utf8'), saltBytes])).digest();
+    derivedBytes = Buffer.concat([derivedBytes, previousBlock]);
+  }
+  return { key: derivedBytes.subarray(0, keyLength), iv: derivedBytes.subarray(keyLength, keyLength + ivLength) };
+}
+
+// ECB 처럼 IV 를 쓰지 않는 방식은 null 을 넘겨야 한다
+function ivOrNull(cipherName, ivBytes) {
+  return crypto.getCipherInfo(cipherName).ivLength ? ivBytes : null;
+}
+
+// 화면: 한 건은 값만, 목록은 {"id","value"} 한 줄씩, 표는 TSV. --out 이면 파일에 쓰고 화면에는 건수와 모양만 찍는다
+function writeDecryptResult(decryptJob, outFile) {
+  const resultText = formatDecryptResult(decryptJob);
+  if (!outFile) {
+    process.stdout.write(resultText);
+    printDecryptFailures(decryptJob, console.error);
+    return;
+  }
+  const outPath = localArg(outFile);
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, resultText, { mode: 0o600 });
+  console.log(`푼 결과 파일: ${outPath}`);
+  printDecryptSummary(decryptJob);
+}
+
+function formatDecryptResult(decryptJob) {
+  const valueOf = (decryptRequest) => decryptRequest.result.plainText ?? '';
+  if (decryptJob.kind === 'single') return `${valueOf(decryptJob.requests[0])}\n`;
+  if (decryptJob.kind === 'items') return decryptJob.requests.map((decryptRequest) => `${JSON.stringify({ id: decryptRequest.id, value: decryptRequest.result.plainText ?? null })}\n`).join('');
+  const helperColumns = new Set(decryptJob.headerRow.filter((header) => decryptJob.columnPrefixes.some((columnPrefix) => header.startsWith(`${columnPrefix}_`))));
+  const outputHeader = [...decryptJob.headerRow.filter((header) => !helperColumns.has(header)), ...decryptJob.columnPrefixes];
+  const outputRows = decryptJob.dataRows.map((dataRow, rowIndex) => {
+    const keptCells = dataRow.filter((cellValue, columnIndex) => !helperColumns.has(decryptJob.headerRow[columnIndex]));
+    const decryptedCells = decryptJob.columnPrefixes.map((columnPrefix) => valueOf(decryptJob.requests.find((decryptRequest) => decryptRequest.rowIndex === rowIndex && decryptRequest.columnPrefix === columnPrefix)));
+    return [...keptCells, ...decryptedCells];
+  });
+  return [outputHeader, ...outputRows].map((tableRow) => tableRow.join('\t')).join('\n') + '\n';
+}
+
+// 열(목록·한 건은 하나로 묶음)마다 푼 건수·빈 칸·못 푼 건수와 값 모양(숫자 #, 한글 가, 영문 A)만 찍는다
+function printDecryptSummary(decryptJob) {
+  const groupNameOf = (decryptRequest) => decryptRequest.columnPrefix ?? '값';
+  for (const groupName of [...new Set(decryptJob.requests.map(groupNameOf))]) {
+    const groupResults = decryptJob.requests.filter((decryptRequest) => groupNameOf(decryptRequest) === groupName).map((decryptRequest) => decryptRequest.result);
+    const valueShapes = new Map();
+    for (const { plainText } of groupResults.filter((groupResult) => groupResult.plainText !== undefined)) {
+      const valueShape = plainText.replace(/\d/g, '#').replace(/[가-힣]/g, '가').replace(/[A-Za-z]/g, 'A');
+      valueShapes.set(valueShape, (valueShapes.get(valueShape) ?? 0) + 1);
+    }
+    const countOf = (isCounted) => groupResults.filter(isCounted).length;
+    console.log(`- ${groupName}: 풂 ${countOf((groupResult) => groupResult.plainText !== undefined)}건, 빈 칸 ${countOf((groupResult) => groupResult.isEmpty)}건, 못 풂 ${countOf((groupResult) => groupResult.failure)}건`);
+    const topShapes = [...valueShapes].sort((firstShape, secondShape) => secondShape[1] - firstShape[1]).slice(0, 5);
+    if (topShapes.length) console.log(`  모양: ${topShapes.map(([valueShape, shapeCount]) => `${valueShape} ${shapeCount}건`).join(', ')}`);
+  }
+  printDecryptFailures(decryptJob, console.log);
+}
+
+// 못 푼 이유별로 몇 건인지와 앞 몇 건의 자리(목록 id, 표 행 번호)
+function printDecryptFailures(decryptJob, printLine) {
+  const failuresByReason = new Map();
+  decryptJob.requests.filter((decryptRequest) => decryptRequest.result.failure).forEach((decryptRequest) => {
+    const failurePlace = decryptRequest.columnPrefix ? `${decryptRequest.rowIndex + 2}행` : `id ${decryptRequest.id ?? 1}`;
+    failuresByReason.set(decryptRequest.result.failure, [...(failuresByReason.get(decryptRequest.result.failure) ?? []), failurePlace]);
+  });
+  for (const [failureReason, failurePlaces] of failuresByReason) {
+    printLine(`  못 풂 ${failurePlaces.length}건: ${failureReason} (${failurePlaces.slice(0, 5).join(', ')}${failurePlaces.length > 5 ? ' …' : ''})`);
+  }
 }
 
 // ---------- 버전 ----------
@@ -1316,6 +1628,7 @@ function cmdList() {
     mode: server.mode,
     mirror: server.mirror,
     sudo: server.sudo.join(','),
+    secrets: server.secrets.join(','),
     projects: (server.projects || []).join(','),
     desc: server.desc,
   }));
@@ -1337,7 +1650,7 @@ function currentProjectName() {
 
 // 별칭 아래에 항목을 한 줄에 하나씩, 빈 항목은 뺀다
 function printAliasBlocks(aliasRows) {
-  const blockFields = ['host', 'user', 'auth', 'root', 'mode', 'mirror', 'sudo', 'projects', 'desc'];
+  const blockFields = ['host', 'user', 'auth', 'root', 'mode', 'mirror', 'sudo', 'secrets', 'projects', 'desc'];
   for (const row of aliasRows) {
     console.log(`\n${row.mark || ' '} ${row.alias}`);
     for (const field of blockFields.filter((blockField) => row[blockField])) console.log(`    - ${field}: ${row[field]}`);
@@ -1363,6 +1676,10 @@ async function main() {
     case 'sudo': return cmdRun(a1, a2, 'sudo');
     case 'sudo-allow':
     case 'sudo-remove': return cmdSudoList(a0, a1, a2);
+    case 'secret-allow':
+    case 'secret-remove': return cmdSecretList(a0, a1, a2);
+    case 'decrypt': return cmdDecrypt(argv.slice(1));
+    case 'encrypt': return cmdEncrypt(argv.slice(1));
     case 'set':
     case 'new': return cmdSetNew(a0, a1, a2, a3);
     case 'show': return cmdShow(a1);
